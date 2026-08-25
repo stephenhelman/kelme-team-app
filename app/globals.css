@@ -1,26 +1,54 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0b1410;
+  --foreground: #f3f5f2;
+
+  /* Pitch: deep turf green, used for chrome/background depth. */
+  --color-pitch-950: #0b1410;
+  --color-pitch-900: #101f18;
+  --color-pitch-800: #17301f;
+  --color-pitch-700: #1f4229;
+
+  /* Kit: the signature accent — a jersey gold/amber, used sparingly. */
+  --color-kit-400: #ffcf4d;
+  --color-kit-500: #f5b400;
+  --color-kit-600: #d99a00;
+
+  --font-display: "Anton", "Arial Narrow", sans-serif;
+  --font-body: "Inter", "Helvetica Neue", sans-serif;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-pitch-950: var(--color-pitch-950);
+  --color-pitch-900: var(--color-pitch-900);
+  --color-pitch-800: var(--color-pitch-800);
+  --color-pitch-700: var(--color-pitch-700);
+
+  --color-kit-400: var(--color-kit-400);
+  --color-kit-500: var(--color-kit-500);
+  --color-kit-600: var(--color-kit-600);
+
+  --font-display: var(--font-display);
+  --font-body: var(--font-body);
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-body);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }
