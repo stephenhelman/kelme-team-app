@@ -13,10 +13,10 @@ function Placeholder({ label, className = "" }: { label: string; className?: str
 
   return (
     <div
-      className={`flex items-center justify-center bg-pitch-800 ${className}`}
+      className={`flex items-center justify-center bg-surface ${className}`}
       aria-hidden="true"
     >
-      <span className="font-display text-2xl tracking-wide text-white/20">{initials || "K"}</span>
+      <span className="font-display text-2xl tracking-wide text-neutral-300">{initials || "K"}</span>
     </div>
   );
 }

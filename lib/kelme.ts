@@ -1,0 +1,155 @@
+/**
+ * Server-side Kelme B2B client. The token and the plain-http China host must
+ * never reach the browser — only call these from route handlers / the seed
+ * script, never from a "use client" component or anything imported by one.
+ */
+
+const B2B_URL =
+  process.env.KELME_B2B_URL ??
+  "http://gkemb2b.kelmechina.com:5020/svr/portal/servlets/binserv/B2B";
+const ORIGIN = process.env.KELME_ORIGIN ?? "http://gkemb2b.kelmechina.com:5020";
+
+export function isKelmeTokenConfigured(): boolean {
+  return Boolean(process.env.KELME_TOKEN);
+}
+
+interface KelmeTransactionResult {
+  code: string;
+  result?: unknown;
+}
+
+async function callB2B(command: string, params: Record<string, unknown>): Promise<KelmeTransactionResult> {
+  const token = process.env.KELME_TOKEN;
+  if (!token) {
+    throw new Error("KELME_TOKEN is not set — paste a fresh session token into .env to call Kelme");
+  }
+
+  const transactions = [{ id: 1, command: "com.agilecontrol.b2bweb.B2BCmd", params: { parentnode: -1, cmd: command, ...params } }];
+  const body = new URLSearchParams();
+  body.set("transactions", JSON.stringify(transactions));
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+
+  let response: Response;
+  try {
+    response = await fetch(B2B_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Token: token,
+        Origin: ORIGIN,
+        Referer: `${ORIGIN}/portal/`,
+      },
+      body: body.toString(),
+      signal: controller.signal,
+      cache: "no-store",
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(controller.signal.aborted ? "Kelme request timed out after 30s" : `Kelme network error: ${message}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!response.ok) {
+    throw new Error(`Kelme returned HTTP ${response.status}`);
+  }
+
+  const data = await response.json();
+  const tx: KelmeTransactionResult = Array.isArray(data) ? data[0] : data;
+
+  if (tx?.code === "000005") {
+    throw new Error("Kelme session expired (code 000005) — paste a fresh token into KELME_TOKEN");
+  }
+
+  return tx;
+}
+
+export interface RawFavoriteProduct {
+  no: string;
+  note: string;
+  price: number;
+  discount_price: number;
+  colors: string;
+  mainpic: string;
+  stylename: string;
+  fabelement?: string;
+  id: number;
+  [dimKey: `m_dim${number}_id`]: string | undefined;
+}
+
+export interface FavoritesPage {
+  total: number;
+  products: RawFavoriteProduct[];
+}
+
+// Endpoint A: the vendor's favorited catalog — the store itself (~152 items).
+export async function fetchFavoritesPage(start: number, pagesize: number): Promise<FavoritesPage> {
+  const tx = await callB2B("b2b.pdt.search", { start, pagesize, isfav: true });
+  const result = tx.result as { total?: number; pdt_s?: RawFavoriteProduct[] } | undefined;
+  return {
+    total: result?.total ?? 0,
+    products: Array.isArray(result?.pdt_s) ? result.pdt_s : [],
+  };
+}
+
+// Confirmed against a live b2b.pdt.sheet response: a spreadsheet grid, cells
+// keyed "row:col". Each color gets 3 rows starting at a qtyRow index R:
+// R = "Order Quantity" (editable, ignored here), R+1 = "Headquarters
+// Inventory" (the stock we want), R+2 = "Pending Inventory" (ignored). The
+// size header lives in row 0 at each sizeCol index, newline-separated
+// (KELME size first). colorContrast maps the row-0 label ("{styleCode}
+// {ColorName},{code}") to the color code.
+export interface SkuSheetCell {
+  t: "s" | "i" | "f";
+  e?: boolean;
+  v?: string;
+  f?: string; // formula text — the per-unit FOB cost is embedded here as amt(<price>, ...)
+  k?: string;
+}
+
+export interface RawSkuSheet {
+  def?: {
+    cells: Record<string, SkuSheetCell>;
+    rows: number;
+    cols: number;
+    config: {
+      sizeCol: number[];
+      qtyRow: number[];
+      colorContrast: Record<string, string>;
+    };
+  };
+  [key: string]: unknown;
+}
+
+// Endpoint C: per-product color x size stock grid, keyed on pdtid.
+export async function fetchSkuSheet(pdtid: number): Promise<RawSkuSheet> {
+  const tx = await callB2B("b2b.pdt.sheet", { pdtid });
+  return (tx.result as RawSkuSheet) ?? {};
+}
+
+// Per-color product photos live at a fixed pattern on the same image host as
+// mainpic — confirmed via a HEAD-check sweep across sample products (not
+// every color has one; reachability is checked per-product at seed time).
+const IMAGE_BASE = "http://gkemb2b.kelmechina.com:5020/kelmeb2bhw/product/normal";
+
+export function buildColorImageUrl(styleCode: string, colorCode: string): string {
+  return `${IMAGE_BASE}/${styleCode}_${colorCode}_01.jpg`;
+}
+
+// Server-side-only reachability check, run at seed/refresh time — never on a
+// live click. Any failure (404, timeout, network error) is treated as "this
+// color has no dedicated photo", not an exception.
+export async function checkImageExists(url: string): Promise<boolean> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, { method: "HEAD", signal: controller.signal });
+    return res.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}

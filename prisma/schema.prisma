@@ -1,0 +1,86 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Product {
+  id    Int @id @default(autoincrement())
+  pdtid Int @unique
+
+  // Kelme-owned — written only by seed/refresh, keyed on pdtid.
+  styleCode         String
+  name              String
+  colors            String
+  imageUrl          String
+  kelmeCatalogPrice Float
+  kelmeFobCost      Float
+  categoryIds       String  @default("")
+  active            Boolean @default(true)
+
+  // Vendor-owned — written only in admin, never touched by Kelme sync.
+  sellPrice   Float?
+  discount    Float?
+  isPublished Boolean @default(false)
+
+  // Storefront bucket (team/coach/equipment). Null = use the auto-guess rule
+  // (lib/category.ts); set here only when admin overrides it — an override
+  // always wins over the guess, and is never touched by Kelme sync.
+  categoryOverride String?
+
+  // Stock snapshot from the sku-sheet endpoint.
+  stock         String    @default("[]")
+  stockSyncedAt DateTime?
+
+  // Per-color image reachability, checked server-side at seed/refresh time
+  // (never live on click): JSON map of colorCode -> resolved image URL, or
+  // null if {style}_{colorCode}_01.jpg 404s for that color.
+  colorImages String @default("{}")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orderItems OrderItem[]
+}
+
+model Order {
+  id            Int      @id @default(autoincrement())
+  status        String   @default("new")
+  unitCount     Int
+  shippingTotal Float
+  orderTotal    Float
+  paymentLink   String
+  customerName  String
+  customerEmail String
+  customerNote  String   @default("")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  items OrderItem[]
+}
+
+model OrderItem {
+  id        Int     @id @default(autoincrement())
+  orderId   Int
+  order     Order   @relation(fields: [orderId], references: [id])
+  productId Int
+  product   Product @relation(fields: [productId], references: [id])
+
+  styleCode String
+  name      String
+  color     String
+  size      String
+  qty       Int
+  unitPrice Float
+}
+
+// Singleton config row (id fixed at 1) — shipping/minimum are admin-editable
+// settings that must persist, distinct from Kelme- or vendor-owned product data.
+model Settings {
+  id              Int   @id @default(1)
+  shippingPerUnit Float @default(3.0)
+  minOrderUnits   Int   @default(25)
+}

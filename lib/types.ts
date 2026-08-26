@@ -1,62 +1,40 @@
-// A single row as returned by the POC's /inventory endpoint (already parsed
-// from Kelme's positional array form).
-export interface InventoryRow {
-  style: string;
-  color: string;
-  colorCode: string;
-  size: string;
-  warehouse: string;
-  qty: number;
-}
+import type { ProductCategory } from "./category";
 
-export interface InventoryResponse {
-  code: string;
-  count: number;
-  start: number;
-  range: number;
-  tokenHeaderPresent: boolean;
-  rows: InventoryRow[];
-}
-
-export interface WarehouseBreakdown {
-  warehouse: string;
-  qty: number;
-}
-
-// The style + colorCode + sizeLabel tuple is the variant identity — no SKU
-// mapping layer, this renders straight from Kelme's own model.
-export interface Variant {
-  color: string;
-  colorCode: string;
-  size: string;
-  qty: number;
-  warehouses: WarehouseBreakdown[];
-}
-
-export interface ProductColor {
-  color: string;
-  colorCode: string;
-}
-
-// The inventory-side grouping (Sprint 1). Post-1.5 this is the per-size
-// stock overlay joined onto a CatalogProduct by styleCode, not the primary
-// catalog itself.
-export interface Product {
-  style: string;
-  colors: ProductColor[];
-  variants: Variant[];
-  totalQty: number;
-}
-
-// A product from the vendor's favorited B2B catalog (Sprint 1.5) — the
-// PRIMARY catalog source: real name, price, colors, photo.
-export interface CatalogProduct {
-  styleCode: string; // `no` — also the join key into inventory Product.style
-  name: string; // `note`
-  price: number;
-  discountPrice: number;
-  colors: string[];
-  image: string; // `mainpic`, raw upstream URL
-  stylename: string;
+// Sprint 2: the DB-backed store product. Kelme-owned fields come from the
+// seed/refresh; sellPrice/discount/isPublished are vendor-owned, set only
+// in admin and never overwritten by a Kelme sync.
+export interface StoreProduct {
   id: number;
+  pdtid: number;
+  styleCode: string;
+  name: string;
+  colors: string[];
+  imageUrl: string;
+  kelmeCatalogPrice: number;
+  kelmeFobCost: number;
+  active: boolean;
+
+  sellPrice: number | null;
+  discount: number | null;
+  isPublished: boolean;
+
+  // Effective storefront bucket (override ?? auto-guess — see lib/category.ts)
+  // and the raw override itself, so admin can show/clear it.
+  category: ProductCategory;
+  categoryOverride: ProductCategory | null;
+
+  stock: StockEntry[];
+  stockSyncedAt: string | null;
+
+  // colorCode -> resolved image URL, or null if that color has no dedicated
+  // photo (checked server-side at seed/refresh time — see lib/stock.ts).
+  colorImages: Record<string, string | null>;
+}
+
+// One color x size cell from the sku-sheet's "Headquarters Inventory" row.
+export interface StockEntry {
+  color: string;
+  colorCode: string;
+  size: string;
+  qty: number;
 }

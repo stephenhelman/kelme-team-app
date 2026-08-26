@@ -1,44 +1,46 @@
 import type { Metadata } from "next";
-import { Anton, Inter } from "next/font/google";
-import Link from "next/link";
+import { Montserrat, Lato } from "next/font/google";
 import "./globals.css";
+import { CartProvider } from "@/components/CartProvider";
+import { PromoBar } from "@/components/PromoBar";
+import { SiteHeader } from "@/components/SiteHeader";
+import { SiteFooter } from "@/components/SiteFooter";
 
-const anton = Anton({
+// Display face — nav, headings, section titles, buttons. Always paired with
+// uppercase + tracked-out letter-spacing (see .font-display in globals.css);
+// weight per level is set at the call site (medium for nav/buttons, bold for
+// headings) to keep the athletic, kit-sheet identity from the reference.
+const montserrat = Montserrat({
   variable: "--font-display",
-  weight: "400",
+  weight: ["500", "600", "700", "800"],
   subsets: ["latin"],
 });
 
-const inter = Inter({
+// Body face — paragraphs, descriptions, fine print.
+const lato = Lato({
   variable: "--font-body",
+  weight: ["300", "400", "700"],
   subsets: ["latin"],
 });
 
 export const metadata: Metadata = {
-  title: "Kelme Inventory",
-  description: "Browse live Kelme dealer inventory as a catalog.",
+  title: "Kelme Team Store",
+  description: "Team ordering for the vendor's curated Kelme catalog.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="en"
-      className={`${anton.variable} ${inter.variable} h-full antialiased`}
+      className={`${montserrat.variable} ${lato.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col bg-pitch-950 text-neutral-100">
-        <header className="border-b border-white/10 bg-pitch-900/60 backdrop-blur sticky top-0 z-20">
-          <div className="mx-auto max-w-7xl px-4 sm:px-6 py-4 flex items-center gap-3">
-            <Link href="/" className="flex items-center gap-2 group">
-              <span className="h-8 w-8 rounded-full bg-kit-500 flex items-center justify-center font-display text-pitch-950 text-sm">
-                K
-              </span>
-              <span className="font-display tracking-wide text-xl sm:text-2xl uppercase text-neutral-50 group-hover:text-kit-400 transition-colors">
-                Kelme Inventory
-              </span>
-            </Link>
-          </div>
-        </header>
-        <main className="flex-1">{children}</main>
+      <body className="min-h-full flex flex-col bg-paper text-ink">
+        <CartProvider>
+          <PromoBar />
+          <SiteHeader />
+          <main className="flex-1">{children}</main>
+          <SiteFooter />
+        </CartProvider>
       </body>
     </html>
   );

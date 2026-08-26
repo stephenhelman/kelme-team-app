@@ -1,80 +1,138 @@
-import Link from "next/link";
-import type { CatalogProduct } from "@/lib/types";
-import { ProductImage } from "./ProductImage";
+"use client";
 
-// A handful of jersey-ish colors for swatches whose color name we can't map
-// to a real hex (Kelme gives us a name, not a swatch value).
-function swatchColor(colorName: string): string {
-  const key = colorName.trim().toLowerCase();
-  const known: Record<string, string> = {
-    white: "#f4f4f4",
-    black: "#1a1a1a",
-    red: "#c81e2c",
-    blue: "#1e4fc8",
-    navy: "#132250",
-    green: "#1f7a3d",
-    yellow: "#f5c400",
-    orange: "#e0641a",
-    gray: "#7a7a7a",
-    grey: "#7a7a7a",
-    purple: "#5b2a86",
-    pink: "#e0699f",
-    gold: "#c99a2e",
-    silver: "#b9bdc4",
-  };
-  for (const [name, hex] of Object.entries(known)) {
-    if (key.includes(name)) return hex;
-  }
-  // Deterministic fallback so unmapped colors stay visually distinct.
-  let hash = 0;
-  for (let i = 0; i < key.length; i++) hash = key.charCodeAt(i) + ((hash << 5) - hash);
-  const hue = Math.abs(hash) % 360;
-  return `hsl(${hue}, 45%, 45%)`;
-}
+import { useState } from "react";
+import Link from "next/link";
+import type { StoreProduct } from "@/lib/types";
+import { swatchColor } from "@/lib/swatch";
+import { getProductColorNames } from "@/lib/colors";
+import { getStockPill } from "@/lib/availability";
+import { ProductColorProvider, useProductColor } from "./ProductColorContext";
+import { ProductColorImage } from "./ProductColorImage";
+import { ColorAvailabilityModal } from "./ColorAvailabilityModal";
 
 function formatPrice(value: number): string {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value);
 }
 
-export function ProductCard({ product }: { product: CatalogProduct }) {
-  const onSale = product.discountPrice > 0 && product.discountPrice < product.price;
+// preventDefault + stopPropagation on every control here: these buttons sit
+// inside the card's <Link> (so the rest of the card stays click-to-open),
+// and must never trigger that link's navigation.
+function stopLinkNavigation(e: React.MouseEvent) {
+  e.preventDefault();
+  e.stopPropagation();
+}
+
+function StockPillBadge({ product }: { product: StoreProduct }) {
+  const pill = getStockPill(product.stock.map((s) => s.qty));
+  return (
+    <span
+      className={`font-display absolute left-3 top-3 rounded-full px-2.5 py-1 text-[10px] uppercase tracking-wide ${
+        pill.level === "in-stock" ? "bg-white text-ink" : "bg-white/90 text-neutral-500"
+      }`}
+    >
+      {pill.label}
+    </span>
+  );
+}
+
+function CardSwatches({ colors }: { colors: string[] }) {
+  const { selectedColor, setSelectedColor } = useProductColor();
 
   return (
-    <Link
-      href={`/product/${encodeURIComponent(product.styleCode)}`}
-      className="group flex flex-col overflow-hidden rounded-lg border border-white/10 bg-pitch-900/60 transition-colors hover:border-kit-500/50 hover:bg-pitch-800/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kit-400"
-    >
-      <ProductImage src={product.image} alt={product.name} className="aspect-square w-full" />
+    <div className="flex items-center gap-1.5" aria-label={`${colors.length} colorways`}>
+      {colors.slice(0, 6).map((color) => {
+        const selected = color === selectedColor;
+        return (
+          <button
+            key={color}
+            type="button"
+            title={color}
+            aria-pressed={selected}
+            onClick={(e) => {
+              stopLinkNavigation(e);
+              setSelectedColor(color);
+            }}
+            className={`h-4 w-4 shrink-0 rounded-full ring-1 ring-offset-1 transition-transform ${
+              selected ? "scale-110 ring-ink ring-offset-white" : "ring-line ring-offset-white hover:scale-110"
+            }`}
+            style={{ backgroundColor: swatchColor(color) }}
+          />
+        );
+      })}
+      {colors.length > 6 && <span className="text-xs text-neutral-400">+{colors.length - 6}</span>}
+    </div>
+  );
+}
 
-      <div className="flex flex-col gap-2 p-4">
-        <span className="font-display text-base uppercase tracking-wide leading-tight text-neutral-50 group-hover:text-kit-400">
-          {product.name}
-        </span>
-        <span className="text-xs text-neutral-500">{product.styleCode}</span>
+function CardInfoButton({ product }: { product: StoreProduct }) {
+  const [open, setOpen] = useState(false);
 
-        <div className="flex items-center gap-1.5" aria-label={`${product.colors.length} colorways`}>
-          {product.colors.slice(0, 8).map((color) => (
-            <span
-              key={color}
-              title={color}
-              className="h-3.5 w-3.5 rounded-full ring-1 ring-white/20"
-              style={{ backgroundColor: swatchColor(color) }}
-            />
-          ))}
-          {product.colors.length > 8 && (
-            <span className="text-xs text-neutral-400">+{product.colors.length - 8}</span>
-          )}
+  return (
+    <>
+      <button
+        type="button"
+        onClick={(e) => {
+          stopLinkNavigation(e);
+          setOpen(true);
+        }}
+        aria-label={`View color availability for ${product.name}`}
+        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-line text-[10px] text-neutral-500 hover:border-ink hover:text-ink"
+      >
+        i
+      </button>
+      {open && <ColorAvailabilityModal product={product} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
+export function ProductCard({ product }: { product: StoreProduct }) {
+  const hasDiscount = product.discount != null && product.discount > 0 && product.sellPrice != null;
+  const finalPrice =
+    hasDiscount && product.sellPrice != null && product.discount != null
+      ? product.sellPrice * (1 - product.discount / 100)
+      : product.sellPrice;
+
+  const colorNames = getProductColorNames(product);
+
+  return (
+    <ProductColorProvider initialColor={colorNames[0] ?? ""}>
+      <Link href={`/product/${encodeURIComponent(product.styleCode)}`} className="group flex flex-col">
+        <div className="relative overflow-hidden rounded-xl bg-surface">
+          <ProductColorImage
+            product={product}
+            className="aspect-4/5 w-full transition-transform duration-300 group-hover:scale-[1.03]"
+          />
+          <StockPillBadge product={product} />
         </div>
 
-        <div className="mt-1 flex items-baseline gap-2">
-          <span className="font-display text-lg text-kit-400">
-            {formatPrice(onSale ? product.discountPrice : product.price)}
+        <div className="flex flex-col gap-1.5 pt-3">
+          <span className="font-display text-sm uppercase tracking-wide leading-tight text-ink">
+            {product.name}
           </span>
-          {onSale && (
-            <span className="text-xs text-neutral-500 line-through">{formatPrice(product.price)}</span>
+
+          <div className="flex items-baseline gap-2">
+            {finalPrice != null ? (
+              <>
+                <span className="font-display text-base text-ink">{formatPrice(finalPrice)}</span>
+                {hasDiscount && product.sellPrice != null && (
+                  <span className="text-xs text-neutral-400 line-through">
+                    {formatPrice(product.sellPrice)}
+                  </span>
+                )}
+              </>
+            ) : (
+              <span className="text-sm text-neutral-400">Price not set</span>
+            )}
+          </div>
+
+          {colorNames.length > 0 && (
+            <div className="mt-0.5 flex items-center justify-between gap-2">
+              <CardSwatches colors={colorNames} />
+              <CardInfoButton product={product} />
+            </div>
           )}
         </div>
-      </div>
-    </Link>
+      </Link>
+    </ProductColorProvider>
   );
 }

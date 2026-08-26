@@ -1,32 +1,36 @@
 @import "tailwindcss";
 
 :root {
-  --background: #0b1410;
-  --foreground: #f3f5f2;
+  --background: #ffffff;
+  --foreground: #0a0a0a;
 
-  /* Pitch: deep turf green, used for chrome/background depth. */
-  --color-pitch-950: #0b1410;
-  --color-pitch-900: #101f18;
-  --color-pitch-800: #17301f;
-  --color-pitch-700: #1f4229;
+  /* Ink/paper: the storefront's black-and-white base — black nav/footer/pill
+     buttons, white product surfaces. */
+  --color-ink: #0a0a0a;
+  --color-ink-soft: #2b2b2b;
+  --color-paper: #ffffff;
+  --color-surface: #f6f6f4;
+  --color-line: #e5e5e2;
 
-  /* Kit: the signature accent — a jersey gold/amber, used sparingly. */
+  /* Kit: the signature accent — a jersey gold/amber, used sparingly for
+     selected states and highlights, never as the primary button color. */
   --color-kit-400: #ffcf4d;
   --color-kit-500: #f5b400;
   --color-kit-600: #d99a00;
 
-  --font-display: "Anton", "Arial Narrow", sans-serif;
-  --font-body: "Inter", "Helvetica Neue", sans-serif;
+  --font-display: "Montserrat", "Arial Narrow", sans-serif;
+  --font-body: "Lato", "Helvetica Neue", sans-serif;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
 
-  --color-pitch-950: var(--color-pitch-950);
-  --color-pitch-900: var(--color-pitch-900);
-  --color-pitch-800: var(--color-pitch-800);
-  --color-pitch-700: var(--color-pitch-700);
+  --color-ink: var(--color-ink);
+  --color-ink-soft: var(--color-ink-soft);
+  --color-paper: var(--color-paper);
+  --color-surface: var(--color-surface);
+  --color-line: var(--color-line);
 
   --color-kit-400: var(--color-kit-400);
   --color-kit-500: var(--color-kit-500);
@@ -40,6 +44,29 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-body);
+  font-weight: 400;
+}
+
+/*
+ * Type scale — Montserrat (display) is what gives this its athletic,
+ * kit-sheet identity: it must never render at default weight/spacing.
+ * Lato (body) stays quiet and regular by comparison.
+ *
+ *   Hero / page h1     text-3xl/5xl  font-display + font-bold (700)      uppercase, tracking-wide
+ *   Section h2         text-xl/3xl   font-display + font-semibold (600)  uppercase, tracking-wide
+ *   Nav / buttons      text-sm/base  font-display (600 default below)    uppercase, tracking-wide
+ *   Card / label text  text-sm/base  font-display (600 default below)    uppercase, tracking-wide
+ *   Price / numerals   text-lg/2xl   font-display (600 default below)    no uppercase
+ *   Body copy          text-sm/base  font-body, 400                      normal case
+ *   Fine print          text-xs      font-body, 400, text-neutral-500    normal case
+ *
+ * .font-display carries the tracked-out letter-spacing and a medium-weight
+ * (600) default everywhere it's used; call sites add font-bold for the
+ * heavier hero/section-heading tier.
+ */
+.font-display {
+  letter-spacing: 0.04em;
+  font-weight: 600;
 }
 
 @media (prefers-reduced-motion: reduce) {
