@@ -80,9 +80,9 @@ export function Catalog({ initialProducts, initialHasMore, initialCategory, init
   }, [hasMore, loading, fetchPage]);
 
   return (
-    <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6 sm:py-14">
-      <div className="mb-8 flex flex-col items-center gap-6 text-center">
-        <h1 className="font-display font-bold text-3xl uppercase tracking-wide text-ink sm:text-4xl">
+    <div className="mx-auto max-w-7xl px-3 py-6 sm:px-6 sm:py-14">
+      <div className="mb-6 flex flex-col items-center gap-4 text-center sm:mb-8 sm:gap-6">
+        <h1 className="font-display font-bold text-2xl uppercase tracking-wide text-ink sm:text-4xl">
           Shop All Gear
         </h1>
 
@@ -110,7 +110,7 @@ export function Catalog({ initialProducts, initialHasMore, initialCategory, init
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search style or name…"
-          className="w-64 border-b border-line bg-transparent px-1 py-1.5 text-center text-sm text-ink placeholder:text-neutral-400 focus:border-ink focus:outline-none"
+          className="w-full max-w-64 border-b border-line bg-transparent px-1 py-1.5 text-center text-sm text-ink placeholder:text-neutral-400 focus:border-ink focus:outline-none"
         />
       </div>
 
@@ -120,7 +120,7 @@ export function Catalog({ initialProducts, initialHasMore, initialCategory, init
         </p>
       )}
 
-      <div className="grid grid-cols-1 gap-x-6 gap-y-10 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-x-3 gap-y-6 sm:gap-x-6 sm:gap-y-10 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {products.map((product) => (
           <ProductCard key={product.styleCode} product={product} />
         ))}

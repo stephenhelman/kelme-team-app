@@ -26,7 +26,7 @@ function StockPillBadge({ product }: { product: StoreProduct }) {
   const pill = getStockPill(product.stock.map((s) => s.qty));
   return (
     <span
-      className={`font-display absolute left-3 top-3 rounded-full px-2.5 py-1 text-[10px] uppercase tracking-wide ${
+      className={`font-display absolute left-2 top-2 rounded-full px-2 py-0.5 text-[9px] uppercase tracking-wide sm:left-3 sm:top-3 sm:px-2.5 sm:py-1 sm:text-[10px] ${
         pill.level === "in-stock" ? "bg-white text-ink" : "bg-white/90 text-neutral-500"
       }`}
     >
@@ -52,7 +52,7 @@ function CardSwatches({ colors }: { colors: string[] }) {
               stopLinkNavigation(e);
               setSelectedColor(color);
             }}
-            className={`h-4 w-4 shrink-0 rounded-full ring-1 ring-offset-1 transition-transform ${
+            className={`h-3.5 w-3.5 shrink-0 rounded-full ring-1 ring-offset-1 transition-transform sm:h-4 sm:w-4 ${
               selected ? "scale-110 ring-ink ring-offset-white" : "ring-line ring-offset-white hover:scale-110"
             }`}
             style={{ backgroundColor: swatchColor(color) }}
@@ -76,7 +76,7 @@ function CardInfoButton({ product }: { product: StoreProduct }) {
           setOpen(true);
         }}
         aria-label={`View color availability for ${product.name}`}
-        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-line text-[10px] text-neutral-500 hover:border-ink hover:text-ink"
+        className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-line text-[9px] text-neutral-500 hover:border-ink hover:text-ink sm:h-5 sm:w-5 sm:text-[10px]"
       >
         i
       </button>
@@ -105,32 +105,34 @@ export function ProductCard({ product }: { product: StoreProduct }) {
           <StockPillBadge product={product} />
         </div>
 
-        <div className="flex flex-col gap-1.5 pt-3">
-          <span className="font-display text-sm uppercase tracking-wide leading-tight text-ink">
+        <div className="flex flex-col gap-1 pt-2 sm:gap-1.5 sm:pt-3">
+          <span className="font-display line-clamp-2 min-h-7.5 text-xs uppercase tracking-wide leading-tight text-ink sm:min-h-8.75 sm:text-sm">
             {product.name}
           </span>
 
-          <div className="flex items-baseline gap-2">
+          <div className="flex items-baseline gap-1.5 sm:gap-2">
             {finalPrice != null ? (
               <>
-                <span className="font-display text-base text-ink">{formatPrice(finalPrice)}</span>
+                <span className="font-display text-sm text-ink sm:text-base">{formatPrice(finalPrice)}</span>
                 {hasDiscount && product.sellPrice != null && (
-                  <span className="text-xs text-neutral-400 line-through">
+                  <span className="text-[11px] text-neutral-400 line-through sm:text-xs">
                     {formatPrice(product.sellPrice)}
                   </span>
                 )}
               </>
             ) : (
-              <span className="text-sm text-neutral-400">Price not set</span>
+              <span className="text-xs text-neutral-400 sm:text-sm">Price not set</span>
             )}
           </div>
 
-          {colorNames.length > 0 && (
-            <div className="mt-0.5 flex items-center justify-between gap-2">
-              <CardSwatches colors={colorNames} />
-              <CardInfoButton product={product} />
-            </div>
-          )}
+          <div className="mt-0.5 flex min-h-4 items-center justify-between gap-2 sm:min-h-5">
+            {colorNames.length > 0 && (
+              <>
+                <CardSwatches colors={colorNames} />
+                <CardInfoButton product={product} />
+              </>
+            )}
+          </div>
         </div>
       </Link>
     </ProductColorProvider>
