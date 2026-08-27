@@ -6,13 +6,11 @@ import type { StoreProduct } from "@/lib/types";
 import { swatchColor } from "@/lib/swatch";
 import { getProductColorNames } from "@/lib/colors";
 import { getStockPill } from "@/lib/availability";
+import { formatPrice, getUnitPrice } from "@/lib/price";
 import { ProductColorProvider, useProductColor } from "./ProductColorContext";
 import { ProductColorImage } from "./ProductColorImage";
 import { ColorAvailabilityModal } from "./ColorAvailabilityModal";
-
-function formatPrice(value: number): string {
-  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value);
-}
+import { ProductQuickAddModal } from "./ProductQuickAddModal";
 
 // preventDefault + stopPropagation on every control here: these buttons sit
 // inside the card's <Link> (so the rest of the card stays click-to-open),
@@ -85,12 +83,29 @@ function CardInfoButton({ product }: { product: StoreProduct }) {
   );
 }
 
+function QuickAddButton({ product }: { product: StoreProduct }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={(e) => {
+          stopLinkNavigation(e);
+          setOpen(true);
+        }}
+        aria-label={`Quick add ${product.name}`}
+        className="font-display absolute bottom-2 right-2 flex h-8 w-8 items-center justify-center rounded-full bg-white text-ink shadow-md transition-transform hover:scale-105 sm:bottom-3 sm:right-3"
+      >
+        +
+      </button>
+      {open && <ProductQuickAddModal product={product} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
 export function ProductCard({ product }: { product: StoreProduct }) {
-  const hasDiscount = product.discount != null && product.discount > 0 && product.sellPrice != null;
-  const finalPrice =
-    hasDiscount && product.sellPrice != null && product.discount != null
-      ? product.sellPrice * (1 - product.discount / 100)
-      : product.sellPrice;
+  const { unitPrice: finalPrice, hasDiscount } = getUnitPrice(product);
 
   const colorNames = getProductColorNames(product);
 
@@ -103,6 +118,7 @@ export function ProductCard({ product }: { product: StoreProduct }) {
             className="aspect-4/5 w-full transition-transform duration-300 group-hover:scale-[1.03]"
           />
           <StockPillBadge product={product} />
+          <QuickAddButton product={product} />
         </div>
 
         <div className="flex flex-col gap-1 pt-2 sm:gap-1.5 sm:pt-3">
