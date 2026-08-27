@@ -45,17 +45,17 @@ export function Modal({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className={`relative w-full ${maxWidth} rounded-xl border border-line bg-white p-5 shadow-xl`}
+        className={`relative flex max-h-[75vh] w-full ${maxWidth} flex-col rounded-xl border border-line bg-white shadow-xl`}
       >
         <button
           type="button"
           onClick={onClose}
           aria-label="Close"
-          className="absolute right-4 top-4 text-neutral-400 hover:text-ink"
+          className="absolute right-4 top-4 z-10 text-neutral-400 hover:text-ink"
         >
           ✕
         </button>
-        {children}
+        <div className="overflow-y-auto p-5">{children}</div>
       </div>
     </div>,
     document.body,
