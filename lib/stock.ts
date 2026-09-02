@@ -9,13 +9,6 @@ export interface SkuSheetEntry {
   qty: number;
 }
 
-// Kids gear is sized by height in cm ("110", "120"...) rather than letter
-// sizes — label it "110cm" so it isn't mistaken for a bare number. Letter
-// sizes (S, M, 2XL...) and one-size (均码) pass through untouched.
-function formatSizeLabel(label: string): string {
-  return /^\d+$/.test(label) ? `${label}cm` : label;
-}
-
 // A spreadsheet grid, cells keyed "row:col". Each color gets 3 rows starting
 // at a qtyRow index R: R = "Order Quantity" (ignored), R+1 = "Headquarters
 // Inventory" (the stock we want), R+2 = "Pending Inventory" (ignored). Size
@@ -24,6 +17,11 @@ function formatSizeLabel(label: string): string {
 // to the color code — this is where colorCode truth comes from, never the
 // product detail's `colors` CSV. Confirmed against a live b2b.pdt.sheet
 // response.
+//
+// The size label here is the raw Kelme value, untouched — a bare number like
+// "110" or "4" is ambiguous on its own (kids height in cm vs. a ball size);
+// resolving that ambiguity needs product-level context (name/category) that
+// this parser doesn't have, so it's left to the caller (lib/kelme-capture.ts).
 export function parseSkuSheet(raw: RawSkuSheet, styleCode: string): SkuSheetEntry[] {
   try {
     const def = raw?.def;
@@ -35,7 +33,7 @@ export function parseSkuSheet(raw: RawSkuSheet, styleCode: string): SkuSheetEntr
     for (const col of config.sizeCol) {
       const header = cells[`0:${col}`]?.v ?? "";
       const label = header.split(/\r?\n/)[0]?.trim();
-      if (label) sizeLabels.set(col, formatSizeLabel(label));
+      if (label) sizeLabels.set(col, label);
     }
 
     const entries: SkuSheetEntry[] = [];

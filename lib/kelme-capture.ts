@@ -35,9 +35,10 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-// Kids gear resolves to the EU size for the SKU/Shopify side; adults, balls,
-// and one-size items keep their KELME value as-is. Never the raw cm, never US.
+// Kids gear resolves to the EU size for the SKU/Shopify side; adults and
+// one-size items keep their KELME value as-is. Never the raw cm, never US.
 const KIDS_EU_SIZE_MAP: Record<string, string> = {
+  "100cm": "2",
   "110cm": "4",
   "120cm": "6",
   "130cm": "8",
@@ -47,14 +48,38 @@ const KIDS_EU_SIZE_MAP: Record<string, string> = {
   "170cm": "16",
 };
 
-// Returns null for a cm size with no EU mapping — the caller must flag and
-// skip that variant rather than fall back to the raw kelmeSize, which would
-// leak an unresolved cm value into shopifySize/SKU.
-function resolveShopifySize(kelmeSize: string): string | null {
-  if (/^\d+cm$/.test(kelmeSize)) {
-    return KIDS_EU_SIZE_MAP[kelmeSize] ?? null;
+// A bare numeric size label ("4", "110") is ambiguous on its own — it's
+// either a kids height in cm or a ball size, and the sku-sheet grid gives no
+// unit. The product name disambiguates: Kelme ball listings all say "Ball"
+// or "Football" in the name (confirmed against every ball style in the live
+// catalog — Vortex/Futsal/Football/AFC match balls), and "football"
+// contains "ball" as a substring, so a single case-insensitive check on
+// "ball" covers both without a separate word list.
+function isBallProduct(name: string): boolean {
+  return /ball/i.test(name);
+}
+
+export interface ResolvedSize {
+  kelmeSize: string;
+  shopifySize: string;
+}
+
+// Returns null when the size can't be resolved — the caller must flag and
+// skip that variant rather than fall back to a raw/ambiguous value, which
+// would leak an unresolved size into shopifySize/SKU.
+function resolveSize(rawLabel: string, isBall: boolean): ResolvedSize | null {
+  if (isBall) {
+    // Ball sizes are the KELME value itself — no cm, no EU mapping.
+    return { kelmeSize: rawLabel, shopifySize: rawLabel };
   }
-  return kelmeSize;
+  if (/^\d+$/.test(rawLabel)) {
+    // A bare number on a non-ball product is a kids height in cm.
+    const kelmeSize = `${rawLabel}cm`;
+    const shopifySize = KIDS_EU_SIZE_MAP[kelmeSize];
+    return shopifySize ? { kelmeSize, shopifySize } : null;
+  }
+  // Adult letter sizes, one-size (均码), etc. — KELME value passes through.
+  return { kelmeSize: rawLabel, shopifySize: rawLabel };
 }
 
 // The FOB Xiamen unit cost lives in priceList as a named entry, not price.
@@ -135,6 +160,7 @@ export async function captureProduct(pdtid: number): Promise<CaptureProductResul
 
   const knownCodes = new Set(entries.map((e) => e.colorCode));
   const colorImages = buildColorImageMap(detail.allpic, styleCode, knownCodes);
+  const isBall = isBallProduct(name);
 
   // 1. Color map self-maintains: upsert every colorCode -> colorName seen.
   const colorNameByCode = new Map<string, string>();
@@ -169,11 +195,12 @@ export async function captureProduct(pdtid: number): Promise<CaptureProductResul
   // stored explicitly — it's meaningful stock information, not "no data".
   let variantCount = 0;
   for (const entry of entries) {
-    const shopifySize = resolveShopifySize(entry.kelmeSize);
-    if (shopifySize === null) {
-      warnings.push(`unmapped kids size "${entry.kelmeSize}" (color ${entry.colorCode}) — skipped, not written`);
+    const resolved = resolveSize(entry.kelmeSize, isBall);
+    if (resolved === null) {
+      warnings.push(`unmapped size "${entry.kelmeSize}" (color ${entry.colorCode}) — skipped, not written`);
       continue;
     }
+    const { kelmeSize, shopifySize } = resolved;
     const sku = buildSku(styleCode, entry.colorCode, shopifySize);
     const imageUrl = colorImages.get(entry.colorCode) ?? null;
 
@@ -187,7 +214,7 @@ export async function captureProduct(pdtid: number): Promise<CaptureProductResul
       },
       update: {
         colorName: entry.colorName,
-        kelmeSize: entry.kelmeSize,
+        kelmeSize,
         qty: entry.qty,
         imageUrl,
         sku,
@@ -196,7 +223,7 @@ export async function captureProduct(pdtid: number): Promise<CaptureProductResul
         productId: product.id,
         colorCode: entry.colorCode,
         colorName: entry.colorName,
-        kelmeSize: entry.kelmeSize,
+        kelmeSize,
         shopifySize,
         qty: entry.qty,
         imageUrl,
