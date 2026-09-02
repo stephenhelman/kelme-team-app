@@ -94,6 +94,28 @@ export async function fetchFavoritesPage(start: number, pagesize: number): Promi
   };
 }
 
+export interface RawPriceListEntry {
+  name?: string;
+  value?: string | number;
+}
+
+export interface RawProductDetail {
+  no: string;
+  note: string;
+  price: number;
+  priceList?: RawPriceListEntry[];
+  colors: string; // NAME-ONLY hint — never a code source, never used for image mapping
+  allpic: string[];
+  mainpic: string;
+  [dimKey: `m_dim${number}_id`]: string | undefined;
+}
+
+// Endpoint B: single product detail, keyed on pdtid.
+export async function fetchProductDetail(pdtid: number): Promise<RawProductDetail> {
+  const tx = await callB2B("b2b.pdt.get", { id: pdtid });
+  return (tx.result as RawProductDetail) ?? ({} as RawProductDetail);
+}
+
 // Confirmed against a live b2b.pdt.sheet response: a spreadsheet grid, cells
 // keyed "row:col". Each color gets 3 rows starting at a qtyRow index R:
 // R = "Order Quantity" (editable, ignored here), R+1 = "Headquarters
