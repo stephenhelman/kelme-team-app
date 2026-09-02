@@ -46,3 +46,5 @@ next-env.d.ts
 /prisma/dev.db
 /prisma/dev.db-journal
 kelme-token-test
+shopify-products-live.json
+inventory-fix

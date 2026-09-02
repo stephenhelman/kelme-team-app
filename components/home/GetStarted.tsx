@@ -2,9 +2,9 @@ import Image from "next/image";
 import Link from "next/link";
 
 const CATEGORIES = [
-  { label: "Team", href: "/shop?category=team", image: "/team.webp" },
-  { label: "Coach", href: "/shop?category=coach", image: "/coach.webp" },
-  { label: "Equipment", href: "/shop?category=equipment", image: "/equipment.webp" },
+  { label: "Team", href: "/contact", image: "/team.webp" },
+  { label: "Coach", href: "/contact", image: "/coach.webp" },
+  { label: "Equipment", href: "/contact", image: "/equipment.webp" },
 ];
 
 export function GetStarted() {

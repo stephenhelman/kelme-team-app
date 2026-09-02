@@ -26,10 +26,10 @@ export function Hero() {
             and gear up.
           </p>
           <Link
-            href="/shop"
+            href="/contact"
             className="font-display mt-6 inline-block rounded-full bg-white px-6 py-3 text-sm uppercase tracking-wide text-ink transition-colors hover:bg-kit-400"
           >
-            Shop All Gear
+            Get a Quote
           </Link>
         </div>
       </div>

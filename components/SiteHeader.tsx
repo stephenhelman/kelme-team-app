@@ -1,16 +1,8 @@
 import Link from "next/link";
 import Image from "next/image";
-import { CartBadge } from "./CartBadge";
-import { SearchBox } from "./SearchBox";
 import { MobileNav } from "./MobileNav";
 
-const NAV_LINKS = [
-  { label: "Team", href: "/shop?category=team" },
-  { label: "Coach", href: "/shop?category=coach" },
-  { label: "Equipment", href: "/shop?category=equipment" },
-  { label: "Shop All", href: "/shop" },
-  { label: "Contact", href: "/contact" },
-];
+const NAV_LINKS = [{ label: "Contact", href: "/contact" }];
 
 export function SiteHeader() {
   return (
@@ -40,10 +32,7 @@ export function SiteHeader() {
           <Image src="/logo.webp" alt="Kelme" width={36} height={36} className="h-9 w-9" />
         </Link>
 
-        <div className="flex items-center justify-end gap-3 sm:gap-4">
-          <SearchBox />
-          <CartBadge />
-        </div>
+        <div className="flex items-center justify-end gap-3 sm:gap-4" />
       </div>
     </header>
   );

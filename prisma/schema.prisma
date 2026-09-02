@@ -7,80 +7,76 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// Self-maintaining master color map. Upserted on every Kelme pull:
+// any new colorCode seen gets added, so the map grows with the catalog.
+// colorCode is authoritative; colorName is the display value resolved from it.
+model Color {
+  colorCode String @id // e.g. "100", "416", "609"
+  colorName String // e.g. "White", "Dark Blue", "Wine Red"
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Kelme product identity + product-level reference data.
+// Written only by the Kelme capture, keyed on pdtid.
 model Product {
   id    Int @id @default(autoincrement())
   pdtid Int @unique
 
-  // Kelme-owned — written only by seed/refresh, keyed on pdtid.
-  styleCode         String
-  name              String
-  colors            String
-  imageUrl          String
-  kelmeCatalogPrice Float
-  kelmeFobCost      Float
-  categoryIds       String  @default("")
-  active            Boolean @default(true)
+  styleCode String
+  name      String
 
-  // Vendor-owned — written only in admin, never touched by Kelme sync.
-  sellPrice   Float?
-  discount    Float?
-  isPublished Boolean @default(false)
+  mainpic String @default("") // hero image URL (was imageUrl / mainpic)
 
-  // Storefront bucket (team/coach/equipment). Null = use the auto-guess rule
-  // (lib/category.ts); set here only when admin overrides it — an override
-  // always wins over the guess, and is never touched by Kelme sync.
-  categoryOverride String?
+  // Reference data — captured free from b2b.pdt.get, not used by the sync today,
+  // kept for future pricing + category navigation. Do not remove.
+  kelmeCatalogPrice Float? // catalog "price"
+  kelmeFobCost      Float? // "Unit Price (Fob Xiamen)" — true landed cost
+  categoryIds       String @default("") // m_dim*_id values, comma-joined
 
-  // Stock snapshot from the sku-sheet endpoint.
-  stock         String    @default("[]")
-  stockSyncedAt DateTime?
+  syncedAt  DateTime? // last successful Kelme pull for this product
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
 
-  // Per-color image reachability, checked server-side at seed/refresh time
-  // (never live on click): JSON map of colorCode -> resolved image URL, or
-  // null if {style}_{colorCode}_01.jpg 404s for that color.
-  colorImages String @default("{}")
+  variants Variant[]
+}
+
+// The core unit. One row per color × size that Kelme actually offers.
+// Carries both the Kelme identity and the Shopify identity + the SKU join key.
+model Variant {
+  id        Int     @id @default(autoincrement())
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId Int
+
+  // Kelme identity
+  colorCode   String // authoritative color key
+  colorName   String // resolved from the Color map (denormalized for convenience)
+  kelmeSize   String // raw Kelme size, e.g. "130cm", "M"
+  shopifySize String // resolved Shopify-facing size, e.g. "8", "M"
+  qty         Int    @default(0) // current Kelme stock (0 is valid and meaningful; not blank)
+  imageUrl    String? // this color's image URL (by code), null if none exists
+
+  // The join key — built by buildSku(styleCode, colorCode, shopifySize).
+  sku String
+
+  // Shopify identity — filled once matched/created on Shopify.
+  shopifyVariantId       String? // target for SKU writes
+  shopifyInventoryItemId String? // target for inventory pushes
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  orderItems OrderItem[]
+  @@unique([productId, colorCode, shopifySize]) // one variant per color+size per product
+  @@index([productId])
+  @@index([sku])
 }
 
-model Order {
-  id            Int      @id @default(autoincrement())
-  status        String   @default("new")
-  unitCount     Int
-  shippingTotal Float
-  orderTotal    Float
-  paymentLink   String
-  customerName  String
-  customerEmail String
-  customerNote  String   @default("")
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-
-  items OrderItem[]
-}
-
-model OrderItem {
-  id        Int     @id @default(autoincrement())
-  orderId   Int
-  order     Order   @relation(fields: [orderId], references: [id])
-  productId Int
-  product   Product @relation(fields: [productId], references: [id])
-
-  styleCode String
-  name      String
-  color     String
-  size      String
-  qty       Int
-  unitPrice Float
-}
-
-// Singleton config row (id fixed at 1) — shipping/minimum are admin-editable
-// settings that must persist, distinct from Kelme- or vendor-owned product data.
-model Settings {
-  id              Int   @id @default(1)
-  shippingPerUnit Float @default(3.0)
-  minOrderUnits   Int   @default(25)
+// Singleton row (id fixed at 1) holding the Shopify Admin API access token
+// for the single-store custom app. Token is AES-256-GCM encrypted at rest
+// with SHOPIFY_TOKEN_ENCRYPTION_KEY (lib/shopify.ts) — never stored plain.
+model ShopifyToken {
+  id             Int      @id @default(1)
+  encryptedToken String
+  scope          String
+  updatedAt      DateTime @updatedAt
 }
