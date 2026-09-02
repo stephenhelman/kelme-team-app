@@ -32,6 +32,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
@@ -45,6 +46,14 @@ next-env.d.ts
 # prisma
 /prisma/dev.db
 /prisma/dev.db-journal
+
+# scratch / one-off dev artifacts
 kelme-token-test
 shopify-products-live.json
 inventory-fix
+*-dump.json
+*-live.json
+*.csv
+*.log
+token-life.log
+size-inspection.txt
