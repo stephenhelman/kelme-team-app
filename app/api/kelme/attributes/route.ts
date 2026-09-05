@@ -4,7 +4,7 @@ import path from "path";
 import { adminCookieName, isValidAdminToken } from "@/lib/admin-auth";
 import { captureAllProductAttributes } from "@/lib/kelme-attributes";
 
-export const maxDuration = 800;
+export const maxDuration = 300;
 
 const REPORT_PATH = path.join(process.cwd(), "kelme-attributes-report.json");
 
@@ -22,6 +22,9 @@ export async function POST(req: NextRequest) {
     await writeFile(REPORT_PATH, JSON.stringify(report, null, 2), "utf8");
     return NextResponse.json(report);
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: 500 },
+    );
   }
 }
