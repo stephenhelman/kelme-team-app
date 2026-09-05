@@ -4,7 +4,7 @@ import { adminCookieName, isValidAdminToken } from "@/lib/admin-auth";
 // Trivial shared-password gate for the prototype's admin portal — not real
 // user auth (that's post-greenlight). Protects the /admin pages and the
 // /api/admin/* routes they call.
-export function proxy(req: NextRequest) {
+export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   if (pathname === "/admin/login" || pathname === "/api/admin/login") {
