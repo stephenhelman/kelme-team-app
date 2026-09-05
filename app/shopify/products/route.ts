@@ -1,7 +1,8 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { writeFile } from "fs/promises";
 import path from "path";
 import { shopifyAdminFetch, parseNextPageUrl } from "@/lib/shopify";
+import { adminCookieName, isValidAdminToken } from "@/lib/admin-auth";
 
 interface ShopifyVariant {
   id: number;
@@ -45,7 +46,12 @@ interface TrimmedProduct {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const token = req.cookies.get(adminCookieName())?.value;
+  if (!isValidAdminToken(token)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const products: TrimmedProduct[] = [];
   let nextUrl: string | null = "/products.json?limit=250";
   let page = 0;

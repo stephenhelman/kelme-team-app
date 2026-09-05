@@ -1,9 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { exchangeCodeForToken, saveAccessToken } from "@/lib/shopify";
+import { adminCookieName, isValidAdminToken } from "@/lib/admin-auth";
 
 const STATE_COOKIE = "shopify_oauth_state";
 
 export async function GET(req: NextRequest) {
+  const adminToken = req.cookies.get(adminCookieName())?.value;
+  if (!isValidAdminToken(adminToken)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const code = req.nextUrl.searchParams.get("code");
   const state = req.nextUrl.searchParams.get("state");
   const expectedState = req.cookies.get(STATE_COOKIE)?.value;
