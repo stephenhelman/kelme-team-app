@@ -10,14 +10,16 @@
     "db:push": "prisma db push",
     "db:seed": "node --env-file=.env prisma/seed.mjs",
     "db:studio": "prisma studio",
-    "kelme-test": "node --env-file=.env kelme-token-test/index.js"
+    "kelme-test": "node --env-file=.env kelme-token-test/index.js",
+    "worker": "tsx worker/index.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
     "next": "16.3.2",
     "prisma": "^5.22.0",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "tsx": "^4.23.13"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
