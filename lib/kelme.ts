@@ -2,15 +2,27 @@
  * Server-side Kelme B2B client. The token and the plain-http China host must
  * never reach the browser — only call these from route handlers / the seed
  * script, never from a "use client" component or anything imported by one.
+ *
+ * The session token lives in the DB (KelmeToken, singleton id 1), shared
+ * between the app and the worker, not in a static env var — Kelme rolls the
+ * token forward on live calls (a fresh value in the `Token` response
+ * header), and the old env-var approach couldn't persist that, so it slowly
+ * degraded. See lib/kelme-token.ts for the store.
  */
+import {
+  getStoredKelmeToken,
+  markKelmeTokenDead,
+  saveRefreshedKelmeToken,
+} from "./kelme-token";
 
 const B2B_URL =
   process.env.KELME_B2B_URL ??
   "http://gkemb2b.kelmechina.com:5020/svr/portal/servlets/binserv/B2B";
 const ORIGIN = process.env.KELME_ORIGIN ?? "http://gkemb2b.kelmechina.com:5020";
 
-export function isKelmeTokenConfigured(): boolean {
-  return Boolean(process.env.KELME_TOKEN);
+export async function isKelmeTokenConfigured(): Promise<boolean> {
+  const stored = await getStoredKelmeToken();
+  return stored !== null && stored.status === "alive";
 }
 
 interface KelmeTransactionResult {
@@ -19,9 +31,12 @@ interface KelmeTransactionResult {
 }
 
 async function callB2B(command: string, params: Record<string, unknown>): Promise<KelmeTransactionResult> {
-  const token = process.env.KELME_TOKEN;
-  if (!token) {
-    throw new Error("KELME_TOKEN is not set — paste a fresh session token into .env to call Kelme");
+  const stored = await getStoredKelmeToken();
+  if (!stored) {
+    throw new Error("No Kelme token stored — seed one via scripts/seed-kelme-token.mjs to call Kelme");
+  }
+  if (stored.status !== "alive") {
+    throw new Error(`Kelme session expired (code 000005) — token status is "${stored.status}", re-auth required`);
   }
 
   const transactions = [{ id: 1, command: "com.agilecontrol.b2bweb.B2BCmd", params: { parentnode: -1, cmd: command, ...params } }];
@@ -37,7 +52,7 @@ async function callB2B(command: string, params: Record<string, unknown>): Promis
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
-        Token: token,
+        Token: stored.accessToken,
         Origin: ORIGIN,
         Referer: `${ORIGIN}/portal/`,
       },
@@ -56,11 +71,21 @@ async function callB2B(command: string, params: Record<string, unknown>): Promis
     throw new Error(`Kelme returned HTTP ${response.status}`);
   }
 
+  // Kelme rolls the session token forward on live calls — a fresh value
+  // shows up in the `Token` response header. Persist it so the next call
+  // (from either the app or the worker) picks up the current token instead
+  // of the one that's about to expire.
+  const freshToken = response.headers.get("token");
+  if (freshToken && freshToken !== stored.accessToken) {
+    await saveRefreshedKelmeToken(freshToken);
+  }
+
   const data = await response.json();
   const tx: KelmeTransactionResult = Array.isArray(data) ? data[0] : data;
 
   if (tx?.code === "000005") {
-    throw new Error("Kelme session expired (code 000005) — paste a fresh token into KELME_TOKEN");
+    await markKelmeTokenDead();
+    throw new Error("Kelme session expired (code 000005) — token marked dead, re-auth required");
   }
 
   return tx;

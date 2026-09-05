@@ -2,7 +2,7 @@
  * The permanent Kelme capture module. Per-product capture is the core unit —
  * `captureProduct(pdtid)` pulls one product's detail + stock and upserts
  * Color/Product/Variant; `captureAllFavorites()` is just a paced loop over
- * it. Server-only (imports lib/kelme.ts, which requires KELME_TOKEN).
+ * it. Server-only (imports lib/kelme.ts, which reads the token from the DB).
  *
  * NOT in this module: matching Variants to Shopify variantId/inventoryItemId
  * and pushing inventory. That's a separate, later step.

@@ -133,3 +133,20 @@ model ShopifyToken {
   scope          String
   updatedAt      DateTime @updatedAt
 }
+
+// Singleton row (id fixed at 1) holding the Kelme B2B session token, shared
+// between the app and the worker so a refreshed token persists across
+// restarts instead of degrading (previously a static KELME_TOKEN env var).
+// accessToken/refreshToken are AES-256-GCM encrypted at rest with the same
+// key as ShopifyToken (lib/kelme.ts). "Time alive" is derived from
+// obtainedAt, not stored. No "previous token" is kept — dead credentials
+// have no use.
+model KelmeToken {
+  id              Int      @id @default(1)
+  accessToken     String // encrypted at rest
+  refreshToken    String? // encrypted at rest, if login returns one
+  status          String   @default("alive") // "alive" | "dead" | "needs_reauth"
+  obtainedAt      DateTime
+  lastRefreshedAt DateTime
+  updatedAt       DateTime @updatedAt
+}

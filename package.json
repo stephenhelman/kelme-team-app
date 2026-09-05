@@ -9,6 +9,7 @@
     "lint": "eslint",
     "db:push": "prisma db push",
     "db:seed": "node --env-file=.env prisma/seed.mjs",
+    "kelme:seed-token": "node --env-file=.env scripts/seed-kelme-token.mjs",
     "db:studio": "prisma studio",
     "kelme-test": "node --env-file=.env kelme-token-test/index.js",
     "worker": "tsx worker/index.ts"
