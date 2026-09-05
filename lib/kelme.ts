@@ -116,6 +116,23 @@ export async function fetchProductDetail(pdtid: number): Promise<RawProductDetai
   return (tx.result as RawProductDetail) ?? ({} as RawProductDetail);
 }
 
+// Endpoint D: structured product attributes (Gender, Sub-category,
+// Collection, Seasons, Composition/Material, Weight/Piece, Function, Top or
+// Lower, Description, ...) keyed on pdtid. Distinct from b2b.pdt.get
+// (product summary) — a separate call, separate shape: the attribute list
+// lives at result.data (result.groups just labels the "Product Parameter"
+// section, unused here). Confirmed against a live b2b.pdt.detail response.
+export interface RawProductAttribute {
+  title: string;
+  value: string;
+}
+
+export async function fetchProductAttributes(pdtid: number): Promise<RawProductAttribute[]> {
+  const tx = await callB2B("b2b.pdt.detail", { pdtid });
+  const result = tx.result as { data?: RawProductAttribute[] } | undefined;
+  return Array.isArray(result?.data) ? result.data : [];
+}
+
 // Confirmed against a live b2b.pdt.sheet response: a spreadsheet grid, cells
 // keyed "row:col". Each color gets 3 rows starting at a qtyRow index R:
 // R = "Order Quantity" (editable, ignored here), R+1 = "Headquarters

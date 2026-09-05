@@ -8,8 +8,8 @@
  * and pushing inventory. That's a separate, later step.
  */
 import { prisma } from "@/lib/prisma";
-import { buildSku } from "@/lib/sku";
-import { parseSkuSheet } from "@/lib/stock";
+import { buildSku, ONE_SIZE } from "@/lib/sku";
+import { parseSkuSheet, type SkuSheetEntry } from "@/lib/stock";
 import { fetchFavoritesPage, fetchProductDetail, fetchSkuSheet, type RawPriceListEntry, type RawProductDetail } from "@/lib/kelme";
 
 const CALL_PACING_MS = 400;
@@ -50,13 +50,21 @@ const KIDS_EU_SIZE_MAP: Record<string, string> = {
 
 // A bare numeric size label ("4", "110") is ambiguous on its own — it's
 // either a kids height in cm or a ball size, and the sku-sheet grid gives no
-// unit. The product name disambiguates: Kelme ball listings all say "Ball"
-// or "Football" in the name (confirmed against every ball style in the live
-// catalog — Vortex/Futsal/Football/AFC match balls), and "football"
-// contains "ball" as a substring, so a single case-insensitive check on
-// "ball" covers both without a separate word list.
+// unit. The product name disambiguates, but a plain /ball/i test is a false
+// positive for ball-branded apparel/accessories: "Short Sleeve Football Set
+// (Kids)", "Football Shorts", "Football Socks", "Basketball Bag", "Football
+// Tactics Board", "Pe Football Net" all match "ball" via "football"/
+// "basketball" without being an actual ball — and wrongly skipping the
+// kids-cm/One-Size resolution for those silently drops every one of their
+// variants (the raw Kelme label never matches the Size allow-list). Real
+// ball listings in the catalog are plain — "Football (Hand Stitching)",
+// "Vortex 18.2 Football (Laminated)", "Futsal Ball (Laminated)" — none of
+// them carry an apparel/accessory qualifier, so excluding those qualifiers
+// cleanly separates the two (confirmed against every "ball"-matching name in
+// the live catalog).
+const NON_BALL_QUALIFIERS = /\b(set|shorts|shirt|socks|bag|net|board)\b/i;
 function isBallProduct(name: string): boolean {
-  return /ball/i.test(name);
+  return /ball/i.test(name) && !NON_BALL_QUALIFIERS.test(name);
 }
 
 export interface ResolvedSize {
@@ -78,7 +86,12 @@ function resolveSize(rawLabel: string, isBall: boolean): ResolvedSize | null {
     const shopifySize = KIDS_EU_SIZE_MAP[kelmeSize];
     return shopifySize ? { kelmeSize, shopifySize } : null;
   }
-  // Adult letter sizes, one-size (均码), etc. — KELME value passes through.
+  // Kelme's one-size label is Chinese (均码) — normalize it so it never
+  // leaks into a SKU or a Shopify-facing size string.
+  if (rawLabel === "均码" || rawLabel.trim() === "") {
+    return { kelmeSize: rawLabel, shopifySize: ONE_SIZE };
+  }
+  // Adult letter sizes, etc. — KELME value passes through.
   return { kelmeSize: rawLabel, shopifySize: rawLabel };
 }
 
@@ -126,6 +139,7 @@ export interface CaptureProductResult {
   styleCode: string;
   ok: boolean;
   variantCount: number;
+  blankDropped: number;
   warnings: string[];
   error?: string;
 }
@@ -141,10 +155,10 @@ export async function captureProduct(pdtid: number): Promise<CaptureProductResul
   const name = detail.note ?? "";
 
   if (!styleCode) {
-    return { pdtid, styleCode, ok: false, variantCount: 0, warnings, error: "missing styleCode from product detail" };
+    return { pdtid, styleCode, ok: false, variantCount: 0, blankDropped: 0, warnings, error: "missing styleCode from product detail" };
   }
 
-  const parsed = parseSkuSheet(sheet, styleCode);
+  const { entries: parsed, blankCount } = parseSkuSheet(sheet, styleCode);
   const entries = parsed.filter((e) => {
     if (!e.colorCode) {
       warnings.push(`skipped a stock row with unresolved colorCode ("${e.colorName}")`);
@@ -155,8 +169,10 @@ export async function captureProduct(pdtid: number): Promise<CaptureProductResul
 
   if (entries.length === 0) {
     warnings.push("zero variants produced — flagged, no Product/Variant rows written");
-    return { pdtid, styleCode, ok: false, variantCount: 0, warnings, error: "no stock rows parsed from sku-sheet" };
+    return { pdtid, styleCode, ok: false, variantCount: 0, blankDropped: blankCount, warnings, error: "no stock rows parsed from sku-sheet" };
   }
+
+  const allowedSizes = new Set((await prisma.size.findMany({ select: { shopifySize: true } })).map((s) => s.shopifySize));
 
   const knownCodes = new Set(entries.map((e) => e.colorCode));
   const colorImages = buildColorImageMap(detail.allpic, styleCode, knownCodes);
@@ -201,6 +217,10 @@ export async function captureProduct(pdtid: number): Promise<CaptureProductResul
       continue;
     }
     const { kelmeSize, shopifySize } = resolved;
+    if (!allowedSizes.has(shopifySize)) {
+      warnings.push(`size "${shopifySize}" (color ${entry.colorCode}) not in Size allow-list — dropped, not written`);
+      continue;
+    }
     const sku = buildSku(styleCode, entry.colorCode, shopifySize);
     const imageUrl = colorImages.get(entry.colorCode) ?? null;
 
@@ -233,7 +253,297 @@ export async function captureProduct(pdtid: number): Promise<CaptureProductResul
     variantCount++;
   }
 
-  return { pdtid, styleCode, ok: true, variantCount, warnings };
+  return { pdtid, styleCode, ok: true, variantCount, blankDropped: blankCount, warnings };
+}
+
+export interface ProductDeclarationResult {
+  pdtid: number;
+  styleCode: string;
+  name: string;
+  ok: boolean;
+  colorsWritten: { colorCode: string; colorName: string }[];
+  colorsIgnored: { colorCode: string; colorName: string; reason: string }[];
+  sizesWritten: string[];
+  sizesIgnored: { kelmeSize: string; reason: string }[];
+  error?: string;
+}
+
+// Step 2 of the Shopify-mirror sprint — fresh Kelme pull -> authoritative
+// Product.colors/Product.sizes. Deliberately does NOT touch Variant rows;
+// rebuilding variants from this declaration is Step 3, kept separate so
+// each destructive stage can be dry-run/approved on its own.
+export async function pullProductDeclaration(pdtid: number, styleCodeHint?: string): Promise<ProductDeclarationResult> {
+  const detail = await withRetry(() => fetchProductDetail(pdtid));
+  await sleep(CALL_PACING_MS);
+  const sheet = await withRetry(() => fetchSkuSheet(pdtid));
+
+  const styleCode = detail.no || styleCodeHint || "";
+  const name = detail.note ?? "";
+
+  if (!styleCode) {
+    return { pdtid, styleCode, name, ok: false, colorsWritten: [], colorsIgnored: [], sizesWritten: [], sizesIgnored: [], error: "missing styleCode from product detail" };
+  }
+
+  const { entries } = parseSkuSheet(sheet, styleCode);
+  const isBall = isBallProduct(name);
+  const allowedSizes = new Set((await prisma.size.findMany({ select: { shopifySize: true } })).map((s) => s.shopifySize));
+
+  // Colors: every colorCode present in `entries` already survived the
+  // blank-inventory filter in parseSkuSheet (a blank cell never becomes an
+  // entry) — so any colorCode here holds real stock in at least one size.
+  // "Ignored" colors are named by Kelme (detail.colors, a name-only hint)
+  // but never produced a single stocked entry.
+  const colorsWritten = new Map<string, string>();
+  for (const e of entries) {
+    if (e.colorCode) colorsWritten.set(e.colorCode, e.colorName);
+  }
+  const namedColorNames = new Set((detail.colors ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+  const stockedColorNames = new Set([...colorsWritten.values()]);
+  const colorsIgnored: { colorCode: string; colorName: string; reason: string }[] = [];
+  for (const namedColor of namedColorNames) {
+    if (!stockedColorNames.has(namedColor)) {
+      colorsIgnored.push({ colorCode: "", colorName: namedColor, reason: "named by Kelme but zero stocked entries (blank inventory across every size)" });
+    }
+  }
+  for (const e of entries) {
+    if (!e.colorCode) {
+      colorsIgnored.push({ colorCode: "", colorName: e.colorName, reason: "unresolved colorCode (not in colorContrast map)" });
+    }
+  }
+
+  const sizesWritten = new Set<string>();
+  const sizesIgnored: { kelmeSize: string; reason: string }[] = [];
+  for (const e of entries) {
+    const resolved = resolveSize(e.kelmeSize, isBall);
+    if (resolved === null) {
+      sizesIgnored.push({ kelmeSize: e.kelmeSize, reason: "unresolvable size label" });
+      continue;
+    }
+    if (!allowedSizes.has(resolved.shopifySize)) {
+      sizesIgnored.push({ kelmeSize: e.kelmeSize, reason: `resolved size "${resolved.shopifySize}" not in Size allow-list` });
+      continue;
+    }
+    sizesWritten.add(resolved.shopifySize);
+  }
+
+  await prisma.product.update({
+    where: { pdtid },
+    data: {
+      colors: [...colorsWritten.keys()].sort(),
+      sizes: [...sizesWritten].sort(),
+      syncedAt: new Date(),
+    },
+  });
+
+  return {
+    pdtid,
+    styleCode,
+    name,
+    ok: true,
+    colorsWritten: [...colorsWritten].map(([colorCode, colorName]) => ({ colorCode, colorName })),
+    colorsIgnored,
+    sizesWritten: [...sizesWritten].sort(),
+    sizesIgnored,
+  };
+}
+
+export interface PullDeclarationsReport {
+  total: number;
+  ok: number;
+  failed: { pdtid: number; styleCode: string; error: string }[];
+  stoppedEarly: boolean;
+  stopReason?: string;
+  products: ProductDeclarationResult[];
+}
+
+// Batch runner for Step 2 — every onShopify:true product, paced like
+// captureAllFavorites. Read-only against Variant/onShopify; only
+// Product.colors/sizes/syncedAt are written.
+export async function pullAllDeclarations(): Promise<PullDeclarationsReport> {
+  const report: PullDeclarationsReport = { total: 0, ok: 0, failed: [], stoppedEarly: false, products: [] };
+
+  const targets = await prisma.product.findMany({
+    where: { onShopify: true },
+    orderBy: { id: "asc" },
+    select: { pdtid: true, styleCode: true },
+  });
+  report.total = targets.length;
+
+  for (let i = 0; i < targets.length; i++) {
+    const { pdtid, styleCode } = targets[i];
+    console.log(`[kelme-capture] declaration (${i + 1}/${targets.length}) pdtid ${pdtid} (${styleCode})...`);
+    try {
+      const result = await pullProductDeclaration(pdtid, styleCode);
+      report.products.push(result);
+      if (result.ok) {
+        report.ok++;
+      } else {
+        report.failed.push({ pdtid, styleCode, error: result.error ?? "unknown error" });
+      }
+    } catch (err) {
+      if (isDeadTokenError(err)) {
+        report.stoppedEarly = true;
+        report.stopReason = "Kelme session expired (code 000005) — stopped, existing data left untouched";
+        console.error(`[kelme-capture] ${report.stopReason}`);
+        break;
+      }
+      report.failed.push({ pdtid, styleCode, error: err instanceof Error ? err.message : String(err) });
+    }
+    await sleep(CALL_PACING_MS);
+  }
+
+  console.log(
+    `[kelme-capture] declarations summary: ok=${report.ok}/${report.total} failed=${report.failed.length}` +
+      (report.stoppedEarly ? ` STOPPED EARLY: ${report.stopReason}` : ""),
+  );
+
+  return report;
+}
+
+export interface DeclaredVariant {
+  colorCode: string;
+  colorName: string;
+  kelmeSize: string;
+  shopifySize: string;
+  qty: number;
+}
+
+// Step 3's variant grid — identical resolution to captureProduct's variant
+// loop (blank cells never reach `entries`, so they never reach here either),
+// just returned instead of upserted. Deduped by (colorCode, shopifySize)
+// with last-entry-wins, matching the upsert's unique constraint.
+export function buildDeclaredVariants(entries: SkuSheetEntry[], isBall: boolean, allowedSizes: Set<string>): DeclaredVariant[] {
+  const byKey = new Map<string, DeclaredVariant>();
+  for (const entry of entries) {
+    if (!entry.colorCode) continue;
+    const resolved = resolveSize(entry.kelmeSize, isBall);
+    if (resolved === null) continue;
+    const { kelmeSize, shopifySize } = resolved;
+    if (!allowedSizes.has(shopifySize)) continue;
+    byKey.set(`${entry.colorCode}::${shopifySize}`, {
+      colorCode: entry.colorCode,
+      colorName: entry.colorName,
+      kelmeSize,
+      shopifySize,
+      qty: entry.qty,
+    });
+  }
+  return [...byKey.values()];
+}
+
+export interface RebuildVariantsResult {
+  pdtid: number;
+  styleCode: string;
+  ok: boolean;
+  deletedCount: number;
+  createdCount: number;
+  error?: string;
+}
+
+// Step 3 — delete the existing (muddied) variants and rebuild cleanly from
+// a fresh Kelme pull, per onShopify:true product. Delete-then-create (not
+// upsert) so stale combos from the old muddied data don't survive.
+export async function rebuildVariantsForProduct(pdtid: number, styleCode: string): Promise<RebuildVariantsResult> {
+  const detail = await withRetry(() => fetchProductDetail(pdtid));
+  await sleep(CALL_PACING_MS);
+  const sheet = await withRetry(() => fetchSkuSheet(pdtid));
+
+  const resolvedStyleCode = detail.no || styleCode;
+  const name = detail.note ?? "";
+
+  const { entries } = parseSkuSheet(sheet, resolvedStyleCode);
+  const isBall = isBallProduct(name);
+  const allowedSizes = new Set((await prisma.size.findMany({ select: { shopifySize: true } })).map((s) => s.shopifySize));
+  const declared = buildDeclaredVariants(entries, isBall, allowedSizes);
+
+  const knownCodes = new Set(declared.map((d) => d.colorCode));
+  const colorImages = buildColorImageMap(detail.allpic, resolvedStyleCode, knownCodes);
+
+  const product = await prisma.product.findUniqueOrThrow({ where: { pdtid }, select: { id: true } });
+
+  const [deleted] = await prisma.$transaction([
+    prisma.variant.deleteMany({ where: { productId: product.id } }),
+    prisma.variant.createMany({
+      data: declared.map((d) => ({
+        productId: product.id,
+        colorCode: d.colorCode,
+        colorName: d.colorName,
+        kelmeSize: d.kelmeSize,
+        shopifySize: d.shopifySize,
+        qty: d.qty,
+        imageUrl: colorImages.get(d.colorCode) ?? null,
+        sku: buildSku(resolvedStyleCode, d.colorCode, d.shopifySize),
+      })),
+    }),
+  ]);
+
+  return { pdtid, styleCode: resolvedStyleCode, ok: true, deletedCount: deleted.count, createdCount: declared.length };
+}
+
+export interface RebuildAllReport {
+  onShopifyTotal: number;
+  rebuilt: RebuildVariantsResult[];
+  failed: { pdtid: number; styleCode: string; error: string }[];
+  stoppedEarly: boolean;
+  stopReason?: string;
+  totalDeleted: number;
+  totalCreated: number;
+  offShopifyProductsCleared: number;
+  offShopifyVariantsDeleted: number;
+}
+
+export async function rebuildAllVariants(): Promise<RebuildAllReport> {
+  const report: RebuildAllReport = {
+    onShopifyTotal: 0,
+    rebuilt: [],
+    failed: [],
+    stoppedEarly: false,
+    totalDeleted: 0,
+    totalCreated: 0,
+    offShopifyProductsCleared: 0,
+    offShopifyVariantsDeleted: 0,
+  };
+
+  // Out-of-scope products first — delete-only, no Kelme calls needed.
+  const offShopify = await prisma.product.findMany({ where: { onShopify: false }, select: { id: true } });
+  const offShopifyDelete = await prisma.variant.deleteMany({ where: { productId: { in: offShopify.map((p) => p.id) } } });
+  report.offShopifyProductsCleared = offShopify.length;
+  report.offShopifyVariantsDeleted = offShopifyDelete.count;
+
+  const targets = await prisma.product.findMany({
+    where: { onShopify: true },
+    orderBy: { id: "asc" },
+    select: { pdtid: true, styleCode: true },
+  });
+  report.onShopifyTotal = targets.length;
+
+  for (let i = 0; i < targets.length; i++) {
+    const { pdtid, styleCode } = targets[i];
+    console.log(`[kelme-capture] rebuild (${i + 1}/${targets.length}) pdtid ${pdtid} (${styleCode})...`);
+    try {
+      const result = await rebuildVariantsForProduct(pdtid, styleCode);
+      report.rebuilt.push(result);
+      report.totalDeleted += result.deletedCount;
+      report.totalCreated += result.createdCount;
+    } catch (err) {
+      if (isDeadTokenError(err)) {
+        report.stoppedEarly = true;
+        report.stopReason = "Kelme session expired (code 000005) — stopped, existing data left untouched for remaining products";
+        console.error(`[kelme-capture] ${report.stopReason}`);
+        break;
+      }
+      report.failed.push({ pdtid, styleCode, error: err instanceof Error ? err.message : String(err) });
+    }
+    await sleep(CALL_PACING_MS);
+  }
+
+  console.log(
+    `[kelme-capture] rebuild summary: rebuilt=${report.rebuilt.length}/${report.onShopifyTotal} failed=${report.failed.length} ` +
+      `totalDeleted=${report.totalDeleted} totalCreated=${report.totalCreated} offShopifyDeleted=${report.offShopifyVariantsDeleted}` +
+      (report.stoppedEarly ? ` STOPPED EARLY: ${report.stopReason}` : ""),
+  );
+
+  return report;
 }
 
 export interface CaptureAllReport {
@@ -243,6 +553,8 @@ export interface CaptureAllReport {
   zeroVariant: number[];
   colorsInMap: number;
   totalVariants: number;
+  totalBlankDropped: number;
+  blankDroppedByProduct: { pdtid: number; styleCode: string; blankDropped: number }[];
   stoppedEarly: boolean;
   stopReason?: string;
 }
@@ -255,6 +567,8 @@ export async function captureAllFavorites(): Promise<CaptureAllReport> {
     zeroVariant: [],
     colorsInMap: 0,
     totalVariants: 0,
+    totalBlankDropped: 0,
+    blankDroppedByProduct: [],
     stoppedEarly: false,
   };
 
@@ -277,6 +591,10 @@ export async function captureAllFavorites(): Promise<CaptureAllReport> {
 
     try {
       const result = await captureProduct(id);
+      if (result.blankDropped > 0) {
+        report.totalBlankDropped += result.blankDropped;
+        report.blankDroppedByProduct.push({ pdtid: id, styleCode: result.styleCode, blankDropped: result.blankDropped });
+      }
       if (result.ok) {
         report.captured++;
         report.totalVariants += result.variantCount;
@@ -304,7 +622,8 @@ export async function captureAllFavorites(): Promise<CaptureAllReport> {
 
   console.log(
     `[kelme-capture] summary: captured=${report.captured}/${report.total} failed=${report.failed.length} ` +
-      `zeroVariant=${report.zeroVariant.length} colorsInMap=${report.colorsInMap} totalVariants=${report.totalVariants}` +
+      `zeroVariant=${report.zeroVariant.length} colorsInMap=${report.colorsInMap} totalVariants=${report.totalVariants} ` +
+      `totalBlankDropped=${report.totalBlankDropped}` +
       (report.stoppedEarly ? ` STOPPED EARLY: ${report.stopReason}` : ""),
   );
 

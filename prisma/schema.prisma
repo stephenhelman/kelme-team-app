@@ -11,10 +11,30 @@ datasource db {
 // any new colorCode seen gets added, so the map grows with the catalog.
 // colorCode is authoritative; colorName is the display value resolved from it.
 model Color {
-  colorCode String @id // e.g. "100", "416", "609"
-  colorName String // e.g. "White", "Dark Blue", "Wine Red"
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  colorCode  String  @id // e.g. "100", "416", "609"
+  colorName  String // e.g. "White", "Dark Blue", "Wine Red"
+  shopifyGid String? // color-pattern metaobject GID
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+// The sellable-size allow-list + GID source + capture gate. A size is
+// sellable ONLY if it's in this table — capture drops any variant whose
+// shopifySize isn't here, so phantom sizes can never re-enter.
+model Size {
+  shopifySize String  @id // "8", "M", "One Size", ... — only sellable sizes live here
+  shopifyGid  String? // shopify--size metaobject GID (apparel-taxonomy only)
+  ballSizeGid String? // shopify--ball-size metaobject GID — a DIFFERENT metaobject
+  // definition than shopifyGid above. Shopify's shopify.size metafield is
+  // taxonomy-scoped to apparel; ball products (Soccer Balls category) are
+  // rejected outright if linked to it ("At least one value ... is invalid"),
+  // confirmed live. A bare size like "4" is shared value-space between kids
+  // apparel (shopifyGid) and balls (ballSizeGid) — same shopifySize row,
+  // two different metaobject spaces, chosen by product category at
+  // reconcile time (see lib/shopify-reconcile.ts).
+  kind        String? // "kids" | "adult" | "onesize" | "ball"
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
 
 // Kelme product identity + product-level reference data.
@@ -34,9 +54,42 @@ model Product {
   kelmeFobCost      Float? // "Unit Price (Fob Xiamen)" — true landed cost
   categoryIds       String @default("") // m_dim*_id values, comma-joined
 
+  // Structured attributes from b2b.pdt.detail (a separate, slower endpoint
+  // from b2b.pdt.get above — its own sync timestamp). Gender is the field
+  // this was built for (Kids/Adults tag classification); the rest are
+  // captured now because the endpoint is already being paid for per-product,
+  // kept for later use (navigation, shipping weight) rather than acted on
+  // today. attributesRaw holds the full {title, value} list verbatim as a
+  // safety net for anything not promoted to its own column.
+  gender              String? // e.g. "Men", "Women", "Boys", "Girls", "Unisex"
+  subCategory         String?
+  collection          String?
+  seasons             String?
+  composition         String? // "Composition/Material"
+  weightPerPiece      String? // "Weight/Piece" — raw string, unit unconfirmed
+  function            String?
+  topOrLower          String?
+  kelmeDescription    String? // the "Description" attribute (distinct from `name`, which comes from b2b.pdt.get)
+  attributesRaw       Json?
+  attributesSyncedAt  DateTime? // last successful b2b.pdt.detail pull, separate from `syncedAt`
+
   syncedAt  DateTime? // last successful Kelme pull for this product
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
+
+  // Maintained by the relink step (lib/shopify-relink.ts): true if at least
+  // one variant matched a live Shopify variant on the last reconcile, false
+  // for favorites-only products with no live Shopify listing. Recomputed
+  // every relink run, so it tracks products being added/removed on Shopify.
+  onShopify Boolean @default(false)
+
+  // The authoritative declaration of this product's shape, set by the Kelme
+  // capture (colorCode / shopifySize references, natural-keyed against
+  // Color/Size like Variant already is — no enforced FK). Variants are
+  // DERIVED from colors × sizes (blank-filtered), not independently
+  // maintained — this is the single source of truth for what a product is.
+  colors String[] @default([])
+  sizes  String[] @default([])
 
   variants Variant[]
 }
