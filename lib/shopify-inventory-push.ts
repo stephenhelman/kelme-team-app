@@ -10,12 +10,15 @@
  *                    current on_hand + tracked per variant via nodes(ids:),
  *                    diffs against DB qty, flags suspicious drops.
  *   - executePush  — enables tracking where needed, then writes only the
- *                    variants that differ, chunked, resumable, rate-limited
- *                    with backoff.
+ *                    variants that differ, chunked, rate-limited with
+ *                    backoff. Recomputes candidates fresh every call (no
+ *                    cross-run "already done" skip) — re-running is a
+ *                    harmless no-op for already-correct variants since
+ *                    writes are absolute SETs, not deltas.
  *   - verifyPush   — re-pulls from Shopify, confirms every pushed variant
  *                    landed at its target quantity.
  */
-import { appendFile, readFile } from "fs/promises";
+import { appendFile } from "fs/promises";
 import path from "path";
 import { prisma } from "@/lib/prisma";
 import { shopifyGraphQL } from "@/lib/shopify";
@@ -329,25 +332,6 @@ export interface InventoryPushLogEntry {
   at: string;
 }
 
-async function loadCompletedVariantIds(): Promise<Set<number>> {
-  const done = new Set<number>();
-  try {
-    const raw = await readFile(WRITE_LOG_PATH, "utf8");
-    for (const line of raw.split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        const entry = JSON.parse(line) as InventoryPushLogEntry;
-        if (entry.status === "ok") done.add(entry.variantId);
-      } catch {
-        // skip malformed line
-      }
-    }
-  } catch {
-    // no log yet
-  }
-  return done;
-}
-
 async function appendLog(entries: InventoryPushLogEntry[]): Promise<void> {
   const lines = entries.map((e) => JSON.stringify(e)).join("\n") + "\n";
   await appendFile(WRITE_LOG_PATH, lines, "utf8");
@@ -355,7 +339,6 @@ async function appendLog(entries: InventoryPushLogEntry[]): Promise<void> {
 
 export interface ExecutePushReport {
   candidates: number;
-  skippedAlreadyDone: number;
   trackingEnabled: number;
   trackingFailed: { variantId: number; inventoryItemGid: string; error: string }[];
   processedThisRun: number;
@@ -365,11 +348,20 @@ export interface ExecutePushReport {
   entries: InventoryPushLogEntry[];
 }
 
-// Processes at most `chunkSize` not-yet-logged variants per call (default:
+// Processes at most `chunkSize` of this run's candidates per call (default:
 // all of them). Enables tracking first for any variant that needs it (a
 // disabled inventory item silently drops its level write otherwise), then
-// sets absolute on_hand quantities in batches of up to 100. Safe to call
-// repeatedly — already-logged ("ok") variant ids are skipped.
+// sets absolute on_hand quantities in batches of up to 100.
+//
+// No cross-run "already done" skip: dryRunPush recomputes candidates fresh
+// against live Shopify state + current DB qty every call, so re-pushing a
+// variant that was already pushed correctly is a harmless no-op (SET, not
+// delta). A previous version skipped variants whose id ever appeared as
+// "ok" in the append-only log, from ANY prior run — which meant a variant
+// pushed once, then re-synced to a new DB qty later (via the automatic
+// inventory worker), would be silently frozen at its stale Shopify value
+// forever, since its id was already marked "done". Full runs take ~25s, so
+// resumability wasn't worth that bug class.
 export async function executePush(chunkSize?: number): Promise<ExecutePushReport> {
   const dryRun = await dryRunPush();
   if (!dryRun.location.found || !dryRun.location.matchesExpectedAddress) {
@@ -379,13 +371,11 @@ export async function executePush(chunkSize?: number): Promise<ExecutePushReport
     );
   }
 
-  const completed = await loadCompletedVariantIds();
-  const pending = dryRun.toPush.filter((v) => !completed.has(v.variantId));
-  const candidates = dryRun.toPush.length;
+  const pending = dryRun.toPush;
+  const candidates = pending.length;
 
   const report: ExecutePushReport = {
     candidates,
-    skippedAlreadyDone: candidates - pending.length,
     trackingEnabled: 0,
     trackingFailed: [],
     processedThisRun: 0,
@@ -470,7 +460,7 @@ export async function executePush(chunkSize?: number): Promise<ExecutePushReport
   }
 
   console.log(
-    `[shopify-inventory-push] EXECUTE candidates=${report.candidates} skipped=${report.skippedAlreadyDone} ` +
+    `[shopify-inventory-push] EXECUTE candidates=${report.candidates} ` +
       `processedThisRun=${report.processedThisRun} remaining=${report.remaining} ok=${report.ok} failed=${report.failed} ` +
       `trackingEnabled=${report.trackingEnabled} trackingFailed=${report.trackingFailed.length}`,
   );

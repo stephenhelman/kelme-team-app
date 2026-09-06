@@ -18,10 +18,12 @@ import { adminCookieName, isValidAdminToken } from "@/lib/admin-auth";
 //                  flags suspicious lots-of-stock-to-0 drops.
 //   push-execute — Stage 3 execute. Enables tracking where needed, then
 //                  sets absolute on_hand quantities via
-//                  inventorySetQuantities, chunked/resumable/rate-limited.
-//                  Optional &chunkSize=N processes only N not-yet-logged
-//                  variants this call (omit for "all remaining"), logging
-//                  to shopify-inventory-push-log.jsonl.
+//                  inventorySetQuantities, chunked/rate-limited. Recomputes
+//                  candidates fresh each call (no cross-run skip — safe to
+//                  re-run, SET is idempotent). Optional &chunkSize=N
+//                  processes only the first N of this run's candidates
+//                  (omit for "all"), logging to
+//                  shopify-inventory-push-log.jsonl for audit.
 //   verify       — re-pulls from Shopify, confirms every checked variant's
 //                  on_hand matches DB qty.
 //   location     — just the location confirmation, on its own.
