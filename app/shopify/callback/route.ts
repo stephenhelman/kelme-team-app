@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { exchangeCodeForToken, saveAccessToken } from "@/lib/shopify";
-import { adminCookieName, isValidAdminToken } from "@/lib/admin-auth";
+import { exchangeCodeForToken, saveAccessToken, verifyShopifyOAuthRequest } from "@/lib/shopify";
 
 const STATE_COOKIE = "shopify_oauth_state";
 
+// Entered by Shopify itself (redirect_uri after merchant approval), which
+// never carries our admin cookie — gated on Shopify's hmac signature
+// instead, same as /shopify/auth. The state-cookie check below is a
+// separate, unrelated CSRF guard (ours, not Shopify's) and stays either way.
 export async function GET(req: NextRequest) {
-  const adminToken = req.cookies.get(adminCookieName())?.value;
-  if (!isValidAdminToken(adminToken)) {
+  if (!verifyShopifyOAuthRequest(req.nextUrl.searchParams)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

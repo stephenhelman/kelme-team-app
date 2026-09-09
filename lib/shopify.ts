@@ -6,8 +6,10 @@
 import {
   createCipheriv,
   createDecipheriv,
+  createHmac,
   randomBytes,
   scryptSync,
+  timingSafeEqual,
 } from "crypto";
 import { prisma } from "./prisma";
 import type { Variant } from "@prisma/client";
@@ -35,6 +37,40 @@ export function shopifyAuthorizeUrl(
   url.searchParams.set("redirect_uri", redirectUri);
   url.searchParams.set("state", state);
   return url.toString();
+}
+
+// Verifies a request actually came from Shopify (OAuth entry + callback
+// hits, which arrive without our admin cookie) instead of our normal
+// admin-cookie gate. Standard Shopify OAuth request verification: recompute
+// the HMAC over every query param except hmac/signature, sorted by key,
+// joined as "key=value" pairs with "&", and compare to the hmac param — plus
+// confirm the shop domain matches ours, since a leaked secret + hmac replay
+// against a different shop should still fail.
+export function verifyShopifyOAuthRequest(searchParams: URLSearchParams): boolean {
+  const secret = process.env.SHOPIFY_API_SECRET;
+  if (!secret) throw new Error("SHOPIFY_API_SECRET is not set");
+
+  const hmac = searchParams.get("hmac");
+  if (!hmac) return false;
+
+  const shop = searchParams.get("shop");
+  if (shop && shop !== shopDomain()) return false;
+
+  const params = new URLSearchParams(searchParams);
+  params.delete("hmac");
+  params.delete("signature");
+
+  const message = [...params.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("&");
+
+  const digest = createHmac("sha256", secret).update(message).digest("hex");
+
+  const expected = Buffer.from(digest, "utf8");
+  const actual = Buffer.from(hmac, "utf8");
+  if (expected.length !== actual.length) return false;
+  return timingSafeEqual(expected, actual);
 }
 
 export async function exchangeCodeForToken(
