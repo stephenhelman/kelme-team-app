@@ -142,11 +142,17 @@ model ShopifyToken {
 // obtainedAt, not stored. No "previous token" is kept — dead credentials
 // have no use.
 model KelmeToken {
-  id              Int      @id @default(1)
+  id              Int       @id @default(1)
   accessToken     String // encrypted at rest
   refreshToken    String? // encrypted at rest, if login returns one
-  status          String   @default("alive") // "alive" | "dead" | "needs_reauth"
+  status          String    @default("alive") // "alive" | "dead" | "needs_reauth"
   obtainedAt      DateTime
   lastRefreshedAt DateTime
-  updatedAt       DateTime @updatedAt
+  // Set when the death-notification email has been sent for the CURRENT
+  // dead spell — null means "not yet notified" (or "alive"). Set on the
+  // alive->dead transition so the worker sends exactly one email per death
+  // event instead of one every sync cycle; cleared back to null by the
+  // re-auth flow's successful login (seedKelmeToken).
+  deadNotifiedAt  DateTime?
+  updatedAt       DateTime  @updatedAt
 }

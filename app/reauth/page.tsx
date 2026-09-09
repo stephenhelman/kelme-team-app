@@ -1,6 +1,5 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 interface Captcha {
@@ -10,7 +9,6 @@ interface Captcha {
 }
 
 export default function ReauthPage() {
-  const router = useRouter();
   const [captcha, setCaptcha] = useState<Captcha | null>(null);
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -24,10 +22,6 @@ export default function ReauthPage() {
     setCode("");
     try {
       const res = await fetch("/api/kelme/reauth", { cache: "no-store" });
-      if (res.status === 401) {
-        router.push("/admin/login?next=/reauth");
-        return;
-      }
       const data = await res.json();
       if (!res.ok) {
         setLoadError(data.error ?? "Failed to load captcha");
@@ -58,11 +52,6 @@ export default function ReauthPage() {
         body: JSON.stringify({ pem: captcha.pem, sign: captcha.sign, code }),
       });
       const data = await res.json();
-
-      if (res.status === 401 && data.error === "Unauthorized") {
-        router.push("/admin/login?next=/reauth");
-        return;
-      }
 
       if (!res.ok) {
         setError(data.error ?? "Login failed — try again");

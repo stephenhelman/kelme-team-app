@@ -10,6 +10,7 @@
  */
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "crypto";
 import { prisma } from "./prisma";
+import { sendKelmeReauthNotification } from "./vendor-notify";
 
 function encryptionKey(): Buffer {
   const secret = process.env.SHOPIFY_TOKEN_ENCRYPTION_KEY;
@@ -65,6 +66,7 @@ export async function seedKelmeToken(accessToken: string, refreshToken?: string 
       status: "alive",
       obtainedAt: now,
       lastRefreshedAt: now,
+      deadNotifiedAt: null,
     },
     create: {
       id: 1,
@@ -88,10 +90,32 @@ export async function saveRefreshedKelmeToken(freshAccessToken: string): Promise
   });
 }
 
-/** Called on a code:000005 (dead session) response — halts syncing until a fresh captcha login flips status back to "alive". */
+/**
+ * Called on a code:000005 (dead session) response — halts syncing until a
+ * fresh captcha login flips status back to "alive" (seedKelmeToken, which
+ * also clears deadNotifiedAt).
+ *
+ * Sends exactly one vendor email per death event: deadNotifiedAt starts
+ * null and is only ever set here, atomically (the updateMany's `deadNotifiedAt:
+ * null` guard means only the first caller to observe it null wins the
+ * send), so a token that's already dead — every subsequent sync cycle
+ * until re-auth — never re-sends.
+ */
 export async function markKelmeTokenDead(): Promise<void> {
   await prisma.kelmeToken.update({
     where: { id: 1 },
     data: { status: "dead" },
   });
+
+  const claimed = await prisma.kelmeToken.updateMany({
+    where: { id: 1, deadNotifiedAt: null },
+    data: { deadNotifiedAt: new Date() },
+  });
+  if (claimed.count === 0) return;
+
+  try {
+    await sendKelmeReauthNotification();
+  } catch (err) {
+    console.error(`[kelme-token] dead-notification email failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }

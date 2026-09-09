@@ -1,25 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
-import { adminCookieName, isValidAdminToken } from "@/lib/admin-auth";
 import { attemptKelmeLogin, fetchKelmeCaptcha } from "@/lib/kelme-login";
 import { seedKelmeToken } from "@/lib/kelme-token";
 
-// Admin-gated Kelme captcha re-auth: this is the ONLY way a Kelme token
-// enters KelmeToken (including the first bootstrap) — no manual seeding.
-// GET issues a fresh captcha; POST completes the login and, on success,
-// writes the token via lib/kelme-token.ts. A wrong/expired captcha never
+// Kelme captcha re-auth: this is the ONLY way a Kelme token enters
+// KelmeToken (including the first bootstrap) — no manual seeding. GET
+// issues a fresh captcha; POST completes the login and, on success, writes
+// the token via lib/kelme-token.ts. A wrong/expired captcha never
 // dead-ends — the response carries a fresh captcha to retry with.
+//
+// Ungated on purpose: this route is reached from the vendor re-auth email's
+// link (lib/vendor-notify.ts), opened by the vendor directly — there's no
+// admin session to check, and there's no other admin-side surface left in
+// this app to protect. Kelme credentials never leave the server either way.
 
-function unauthorized() {
-  return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-}
-
-function isAuthorized(req: NextRequest): boolean {
-  return isValidAdminToken(req.cookies.get(adminCookieName())?.value);
-}
-
-export async function GET(req: NextRequest) {
-  if (!isAuthorized(req)) return unauthorized();
-
+export async function GET() {
   try {
     const captcha = await fetchKelmeCaptcha();
     return NextResponse.json(captcha);
@@ -32,8 +26,6 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  if (!isAuthorized(req)) return unauthorized();
-
   const { pem, sign, code } = await req.json().catch(() => ({}));
   if (!pem || !sign || !code) {
     return NextResponse.json({ error: "Missing pem/sign/code" }, { status: 400 });
