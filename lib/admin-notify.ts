@@ -16,6 +16,19 @@ import { prisma } from "./prisma";
 const RESEND_API_URL = "https://api.resend.com/emails";
 const DEFAULT_PERSIST_WINDOW_MS = 12 * 60 * 60 * 1000; // 12h
 
+/**
+ * Sends immediately, bypassing dedup/persist-window state entirely — for
+ * scripts/test-alert.mjs, so a manual check always produces an email
+ * instead of possibly being swallowed by reportSyncAlert's dedup.
+ */
+export async function sendTestAlert(): Promise<void> {
+  await sendAdminAlert(
+    "Kelme sync: test alert",
+    `This is a manual test of the admin alert path (lib/admin-notify.ts), sent at ${new Date().toISOString()}.\n\n` +
+      "If you're reading this, RESEND_API_KEY and ADMIN_NOTIFY_EMAIL are both set correctly wherever this ran.",
+  );
+}
+
 async function sendAdminAlert(subject: string, text: string): Promise<void> {
   const apiKey = process.env.RESEND_API_KEY;
   const to = process.env.ADMIN_NOTIFY_EMAIL;
@@ -79,24 +92,34 @@ export async function reportSyncAlert({
   }
 
   const isNewTransition = !row?.active;
+  // A prior attempt marked the state active but never got a send to
+  // succeed (lastNotifiedAt still null) — retry every cycle, not just
+  // after persistWindowMs, since we haven't actually notified anyone yet.
+  const neverSuccessfullyNotified = !isNewTransition && !row?.lastNotifiedAt;
   const dueForReminder =
-    !isNewTransition && !!row?.lastNotifiedAt && now.getTime() - row.lastNotifiedAt.getTime() >= persistWindowMs;
+    !!row?.lastNotifiedAt && now.getTime() - row.lastNotifiedAt.getTime() >= persistWindowMs;
 
-  if (!isNewTransition && !dueForReminder) return;
+  if (!isNewTransition && !neverSuccessfullyNotified && !dueForReminder) return;
 
   if (!subject || !body) {
     throw new Error(`reportSyncAlert("${kind}"): subject/body are required when isBad is true`);
   }
 
+  // Record the transition to "active" immediately — that's genuinely true
+  // regardless of whether the email goes out. lastNotifiedAt, the dedup
+  // clock, is only set below on a *successful* send, so a failed send
+  // (e.g. missing RESEND_API_KEY) retries next cycle instead of going
+  // silent for a full persistWindowMs.
   await prisma.syncAlert.upsert({
     where: { kind },
-    update: { active: true, lastNotifiedAt: now },
-    create: { kind, active: true, firstSeenAt: now, lastNotifiedAt: now },
+    update: { active: true },
+    create: { kind, active: true, firstSeenAt: now, lastNotifiedAt: null },
   });
 
   try {
     await sendAdminAlert(subject, body);
+    await prisma.syncAlert.update({ where: { kind }, data: { lastNotifiedAt: now } });
   } catch (err) {
-    console.error(`[admin-notify] alert email failed for "${kind}": ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`[admin-notify] alert email failed for "${kind}" — will retry next cycle: ${err instanceof Error ? err.message : String(err)}`);
   }
 }

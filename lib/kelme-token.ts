@@ -125,10 +125,10 @@ export async function saveRefreshedKelmeToken(freshAccessToken: string): Promise
  * (seedKelmeToken, which also clears deadNotifiedAt).
  *
  * Sends exactly one vendor email per death event: deadNotifiedAt starts
- * null and is only ever set here, atomically (the updateMany's `deadNotifiedAt:
- * null` guard means only the first caller to observe it null wins the
- * send), so a token that's already dead — every subsequent sync cycle
- * until re-auth — never re-sends.
+ * null and is only set after a *successful* send, so a send failure (e.g.
+ * missing RESEND_API_KEY) leaves it null rather than falsely marking the
+ * death as notified — a subsequent death detection (or any other caller)
+ * will retry the send instead of going silent until manual re-auth.
  */
 export async function markKelmeTokenDead(deathReason: string): Promise<void> {
   const now = new Date();
@@ -139,15 +139,24 @@ export async function markKelmeTokenDead(deathReason: string): Promise<void> {
 
   await closeOpenHistoryRow(deathReason, now);
 
-  const claimed = await prisma.kelmeToken.updateMany({
-    where: { id: 1, deadNotifiedAt: null },
-    data: { deadNotifiedAt: now },
+  const current = await prisma.kelmeToken.findUnique({
+    where: { id: 1 },
+    select: { deadNotifiedAt: true },
   });
-  if (claimed.count === 0) return;
+  if (current?.deadNotifiedAt) return;
 
   try {
     await sendKelmeReauthNotification();
   } catch (err) {
-    console.error(`[kelme-token] dead-notification email failed: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`[kelme-token] dead-notification email failed — will retry on next death detection: ${err instanceof Error ? err.message : String(err)}`);
+    return;
   }
+
+  // Guarded update rather than a plain set, in case a concurrent caller
+  // also observed deadNotifiedAt as null and is sending right now — only
+  // the first successful send's timestamp should stick.
+  await prisma.kelmeToken.updateMany({
+    where: { id: 1, deadNotifiedAt: null },
+    data: { deadNotifiedAt: now },
+  });
 }
