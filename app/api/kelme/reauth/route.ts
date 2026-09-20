@@ -53,6 +53,6 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  await seedKelmeToken(result.token, result.refreshToken ?? null);
+  await seedKelmeToken(result.token, result.refreshToken ?? null, "captcha_reauth");
   return NextResponse.json({ ok: true });
 }

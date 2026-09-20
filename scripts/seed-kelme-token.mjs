@@ -46,6 +46,7 @@ async function main() {
       status: "alive",
       obtainedAt: now,
       lastRefreshedAt: now,
+      deadNotifiedAt: null,
     },
     create: {
       id: 1,
@@ -56,6 +57,18 @@ async function main() {
       lastRefreshedAt: now,
     },
   });
+
+  // Mirror lib/kelme-token.ts's seedKelmeToken bookkeeping: close whatever
+  // history row is still open (there's a prior token this is superseding),
+  // then open a fresh one for this manually-seeded token.
+  await prisma.kelmeTokenHistory.updateMany({
+    where: { diedAt: null },
+    data: { diedAt: now, deathReason: "manual" },
+  });
+  await prisma.kelmeTokenHistory.create({
+    data: { mintedAt: now, source: "manual_seed" },
+  });
+
   console.log("Kelme token seeded — status=alive, obtainedAt=" + now.toISOString());
 }
 

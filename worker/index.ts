@@ -9,8 +9,16 @@
 import { applyStockToDb } from "@/lib/kelme-inventory";
 import { executePush, verifyPush } from "@/lib/shopify-inventory-push";
 import { executeRelink } from "@/lib/shopify-relink";
+import { reportSyncAlert } from "@/lib/admin-notify";
+import { recordSuccessfulSync } from "@/lib/sync-status";
 
 const SYNC_INTERVAL_MS = 4 * 60 * 60 * 1000;
+
+// A handful of failed variants in one push is typically transient
+// (rate-limit backoff, one bad batch) and self-recovers next cycle — not
+// worth an email. More than this, especially if it isn't a one-off, points
+// at something systemic (Shopify API issue, broken auth, mass stale IDs).
+const PUSH_FAILURE_ALERT_THRESHOLD = 20;
 
 // Matches Shopify's wording for a variant/inventory item that no longer
 // exists at the ID we have on file (rebuilt on Shopify since our last
@@ -49,8 +57,19 @@ async function runSync(): Promise<void> {
     log(
       `sync: HALTED — sanity bound tripped (${applyResult.haltReason}). No Shopify write attempted.`,
     );
+    await reportSyncAlert({
+      kind: "sanity_halt",
+      isBad: true,
+      subject: "Kelme sync halted by sanity guard",
+      body:
+        `The Kelme pull -> DB sync halted without writing:\n\n${applyResult.haltReason}\n\n` +
+        "Existing DB and Shopify data were left untouched. This usually means a broken/partial " +
+        "Kelme pull — check the worker logs and Kelme session before assuming it'll self-heal.",
+    });
     return;
   }
+
+  await reportSyncAlert({ kind: "sanity_halt", isBad: false });
 
   log(
     `sync: DB caught up (matched=${applyResult.matched} updated=${applyResult.updated} ` +
@@ -81,6 +100,20 @@ async function runSync(): Promise<void> {
     }
   }
 
+  if (pushReport.failed > PUSH_FAILURE_ALERT_THRESHOLD) {
+    await reportSyncAlert({
+      kind: "push_failures",
+      isBad: true,
+      subject: `Kelme sync: Shopify push failing (${pushReport.failed} variants)`,
+      body:
+        `The Shopify inventory push failed on ${pushReport.failed} variants this cycle ` +
+        `(ok=${pushReport.ok}), above the ${PUSH_FAILURE_ALERT_THRESHOLD}-variant transient threshold. ` +
+        "That's beyond an isolated blip — check Shopify API status, rate limits, and recent push logs.",
+    });
+  } else {
+    await reportSyncAlert({ kind: "push_failures", isBad: false });
+  }
+
   const verifyResult = await verifyPush();
   log(
     `sync: verify totalChecked=${verifyResult.totalChecked} correct=${verifyResult.correct} ` +
@@ -92,15 +125,24 @@ async function runSync(): Promise<void> {
     );
   }
 
+  await recordSuccessfulSync();
   log("sync: complete");
 }
 
 async function runSyncSafely(): Promise<void> {
   try {
     await runSync();
+    await reportSyncAlert({ kind: "sync_failure", isBad: false });
   } catch (err) {
-    log(
-      `sync: FAILED with unexpected error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+    const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    log(`sync: FAILED with unexpected error: ${message}`);
+    await reportSyncAlert({
+      kind: "sync_failure",
+      isBad: true,
+      subject: "Kelme sync: cycle failed unexpectedly",
+      body: `The sync worker threw an unhandled error and the cycle did not complete:\n\n${message}`,
+    }).catch((notifyErr) =>
+      log(`sync: failed to report sync_failure alert: ${notifyErr instanceof Error ? notifyErr.message : String(notifyErr)}`),
     );
   }
 }

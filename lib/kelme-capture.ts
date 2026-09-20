@@ -20,7 +20,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function isDeadTokenError(err: unknown): boolean {
-  return err instanceof Error && err.message.includes("000005");
+  return err instanceof Error && err.message.includes("session expired");
 }
 
 // Retry once on transient failure; a dead token is never transient, so it
@@ -383,7 +383,7 @@ export async function pullAllDeclarations(): Promise<PullDeclarationsReport> {
     } catch (err) {
       if (isDeadTokenError(err)) {
         report.stoppedEarly = true;
-        report.stopReason = "Kelme session expired (code 000005) — stopped, existing data left untouched";
+        report.stopReason = "Kelme session expired — stopped, existing data left untouched";
         console.error(`[kelme-capture] ${report.stopReason}`);
         break;
       }
@@ -528,7 +528,7 @@ export async function rebuildAllVariants(): Promise<RebuildAllReport> {
     } catch (err) {
       if (isDeadTokenError(err)) {
         report.stoppedEarly = true;
-        report.stopReason = "Kelme session expired (code 000005) — stopped, existing data left untouched for remaining products";
+        report.stopReason = "Kelme session expired — stopped, existing data left untouched for remaining products";
         console.error(`[kelme-capture] ${report.stopReason}`);
         break;
       }
@@ -608,7 +608,7 @@ export async function captureAllFavorites(): Promise<CaptureAllReport> {
     } catch (err) {
       if (isDeadTokenError(err)) {
         report.stoppedEarly = true;
-        report.stopReason = "Kelme session expired (code 000005) — stopped, existing data left untouched";
+        report.stopReason = "Kelme session expired — stopped, existing data left untouched";
         console.error(`[kelme-capture] ${report.stopReason}`);
         break;
       }

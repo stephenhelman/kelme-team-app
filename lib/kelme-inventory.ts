@@ -20,7 +20,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function isDeadTokenError(err: unknown): boolean {
-  return err instanceof Error && err.message.includes("000005");
+  return err instanceof Error && err.message.includes("session expired");
 }
 
 async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
@@ -104,7 +104,7 @@ export async function pullLiveStock(): Promise<PullStockReport> {
     } catch (err) {
       if (isDeadTokenError(err)) {
         report.stoppedEarly = true;
-        report.stopReason = "Kelme session expired (code 000005) — stopped, existing DB data left untouched";
+        report.stopReason = "Kelme session expired — stopped, existing DB data left untouched";
         console.error(`[kelme-inventory] ${report.stopReason}`);
         break;
       }

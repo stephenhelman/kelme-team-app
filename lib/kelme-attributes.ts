@@ -18,7 +18,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function isDeadTokenError(err: unknown): boolean {
-  return err instanceof Error && err.message.includes("000005");
+  return err instanceof Error && err.message.includes("session expired");
 }
 
 // Retry once on transient failure; a dead token is never transient, so it
@@ -165,7 +165,7 @@ export async function captureAllProductAttributes(): Promise<CaptureAllAttribute
     } catch (err) {
       if (isDeadTokenError(err)) {
         report.stoppedEarly = true;
-        report.stopReason = "Kelme session expired (code 000005) — stopped, existing data left untouched";
+        report.stopReason = "Kelme session expired — stopped, existing data left untouched";
         console.error(`[kelme-attributes] ${report.stopReason}`);
         break;
       }

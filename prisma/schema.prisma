@@ -156,3 +156,44 @@ model KelmeToken {
   deadNotifiedAt  DateTime?
   updatedAt       DateTime  @updatedAt
 }
+
+// Lifecycle/observability log for KelmeToken — metrics only, NEVER the token
+// value itself. One row per token "life" (mint -> death), so real lifetime
+// (diedAt - mintedAt) and whether refresh is actually firing (refreshCount,
+// lastRefreshedAt) can be queried directly. At most one row has diedAt: null
+// at a time — that's the current/open life.
+model KelmeTokenHistory {
+  id              Int       @id @default(autoincrement())
+  mintedAt        DateTime
+  diedAt          DateTime?
+  deathReason     String? // "1009" | "000005" | "manual" | ...
+  refreshCount    Int       @default(0)
+  lastRefreshedAt DateTime?
+  source          String // "captcha_reauth" | "manual_seed"
+  createdAt       DateTime  @default(now())
+}
+
+// Singleton (id fixed at 1) recording when the worker last completed a full
+// sync cycle without halting or throwing. The heartbeat check
+// (app/api/cron/heartbeat) compares this against a staleness threshold to
+// catch the worker being down/hung entirely — a failure mode that produces
+// no error to alert on, only silence.
+model SyncStatus {
+  id                   Int       @id @default(1)
+  lastSuccessfulSyncAt DateTime?
+  updatedAt            DateTime  @updatedAt
+}
+
+// Dedup state for admin sync alerts (lib/admin-notify.ts), one row per alert
+// kind ("sanity_halt" | "sync_failure" | "push_failures" | "stale_heartbeat").
+// Mirrors KelmeToken.deadNotifiedAt's "send once per bad spell" pattern, but
+// generalized: `active` tracks whether the kind is currently in a bad state,
+// and lastNotifiedAt gates re-sending a reminder while it persists, instead
+// of re-notifying every check/cycle.
+model SyncAlert {
+  kind           String    @id
+  active         Boolean   @default(false)
+  firstSeenAt    DateTime?
+  lastNotifiedAt DateTime?
+  updatedAt      DateTime  @updatedAt
+}

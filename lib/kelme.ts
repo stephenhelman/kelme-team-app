@@ -26,8 +26,29 @@ export async function isKelmeTokenConfigured(): Promise<boolean> {
 }
 
 interface KelmeTransactionResult {
-  code: string;
+  // Kelme is inconsistent about this being a string ("000005") or a number
+  // (1009) across endpoints/error paths — normalize with String(code)
+  // before comparing or persisting, never compare the raw value.
+  code: string | number;
+  message?: string;
   result?: unknown;
+}
+
+// Kelme codes observed to mean "session is dead, re-auth required." Add to
+// this set the moment a new one turns up — code:000005 is the only one this
+// app used to watch for, and a dead token (code:1009, "会话超时或尚未登录，
+// 请重新登录" / session timeout / not logged in) sailed through undetected
+// until the sanity guard caught the fallout. The message patterns are a
+// backstop for codes we haven't catalogued yet.
+const DEAD_SESSION_CODES = new Set(["000005", "1009"]);
+const DEAD_SESSION_MESSAGE_PATTERNS = [/会话超时/, /尚未登录/, /重新登录/, /session\s*timeout/i, /not\s*logged\s*in/i];
+
+function deadSessionCode(tx: KelmeTransactionResult | undefined): string | undefined {
+  if (!tx) return undefined;
+  const code = tx.code != null ? String(tx.code) : undefined;
+  if (code && DEAD_SESSION_CODES.has(code)) return code;
+  if (tx.message && DEAD_SESSION_MESSAGE_PATTERNS.some((p) => p.test(tx.message!))) return code || "unknown";
+  return undefined;
 }
 
 async function callB2B(command: string, params: Record<string, unknown>): Promise<KelmeTransactionResult> {
@@ -36,7 +57,7 @@ async function callB2B(command: string, params: Record<string, unknown>): Promis
     throw new Error("No Kelme token stored — seed one via scripts/seed-kelme-token.mjs to call Kelme");
   }
   if (stored.status !== "alive") {
-    throw new Error(`Kelme session expired (code 000005) — token status is "${stored.status}", re-auth required`);
+    throw new Error(`Kelme session expired — token status is "${stored.status}", re-auth required`);
   }
 
   const transactions = [{ id: 1, command: "com.agilecontrol.b2bweb.B2BCmd", params: { parentnode: -1, cmd: command, ...params } }];
@@ -83,9 +104,10 @@ async function callB2B(command: string, params: Record<string, unknown>): Promis
   const data = await response.json();
   const tx: KelmeTransactionResult = Array.isArray(data) ? data[0] : data;
 
-  if (tx?.code === "000005") {
-    await markKelmeTokenDead();
-    throw new Error("Kelme session expired (code 000005) — token marked dead, re-auth required");
+  const deathCode = deadSessionCode(tx);
+  if (deathCode) {
+    await markKelmeTokenDead(deathCode);
+    throw new Error(`Kelme session expired (code ${deathCode}) — token marked dead, re-auth required`);
   }
 
   return tx;
