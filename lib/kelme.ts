@@ -57,6 +57,14 @@ async function callB2B(command: string, params: Record<string, unknown>): Promis
     throw new Error("No Kelme token stored — seed one via scripts/seed-kelme-token.mjs to call Kelme");
   }
   if (stored.status !== "alive") {
+    // Every call after the first cycle that discovered the death lands
+    // here (the token stays "dead" in the DB until re-auth) — route it
+    // through markKelmeTokenDead too, not just a bare throw, so a failed
+    // notification send gets retried on a later cycle instead of only
+    // ever being attempted once, at the original detection.
+    // markKelmeTokenDead no-ops the DB writes when already dead and skips
+    // the send entirely once deadNotifiedAt is set from a prior success.
+    await markKelmeTokenDead(`token status is "${stored.status}"`);
     throw new Error(`Kelme session expired — token status is "${stored.status}", re-auth required`);
   }
 
