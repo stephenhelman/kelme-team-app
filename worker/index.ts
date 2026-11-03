@@ -41,7 +41,10 @@ function hasStaleIdFailure(
 }
 
 async function runSync(): Promise<void> {
-  log("sync: starting");
+  // One id per cycle scopes the push's idempotency keys, so a retried chunk
+  // within this cycle can't apply twice; a new cycle always gets new keys.
+  const cycleId = new Date().toISOString();
+  log(`sync: starting (cycle ${cycleId})`);
 
   const applyResult = await applyStockToDb();
 
@@ -76,7 +79,7 @@ async function runSync(): Promise<void> {
       `unmatched=${applyResult.unmatched.length}) — proceeding to Shopify push`,
   );
 
-  let pushReport = await executePush();
+  let pushReport = await executePush({ cycleId });
   log(
     `sync: push ok=${pushReport.ok} failed=${pushReport.failed} ` +
       `trackingEnabled=${pushReport.trackingEnabled} trackingFailed=${pushReport.trackingFailed.length}`,
@@ -91,8 +94,8 @@ async function runSync(): Promise<void> {
       log(
         `sync: relink complete (updated=${relinkResult.updated}) — retrying push`,
       );
-      pushReport = await executePush();
-      log(`sync: retry push ok=${pushReport.ok} failed=${pushReport.failed}`);
+      pushReport = await executePush({ cycleId: `${cycleId}:retry` });
+      log(`sync: retry push ok=${pushReport.ok} failed=${pushReport.failed} casConflicts=${pushReport.casConflicts}`);
     } catch (err) {
       log(
         `sync: relink/retry failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -112,6 +115,24 @@ async function runSync(): Promise<void> {
     });
   } else {
     await reportSyncAlert({ kind: "push_failures", isBad: false });
+  }
+
+  // CAS conflicts mean Shopify's quantity moved between our read and write
+  // (orders landing mid-push, manual edits). A few per cycle is normal and
+  // self-heals next cycle; a pile of them means something is rewriting
+  // inventory underneath the sync. Same threshold as push failures.
+  if (pushReport.casConflicts > PUSH_FAILURE_ALERT_THRESHOLD) {
+    await reportSyncAlert({
+      kind: "cas_conflicts",
+      isBad: true,
+      subject: `Kelme sync: ${pushReport.casConflicts} inventory compare-and-swap conflicts`,
+      body:
+        `${pushReport.casConflicts} variants were skipped this cycle because Shopify's on_hand changed ` +
+        `between the sync's read and write (threshold ${PUSH_FAILURE_ALERT_THRESHOLD}). Nothing was overwritten, ` +
+        "and they retry next cycle. Persistent conflicts suggest another app or a person is editing inventory concurrently.",
+    });
+  } else {
+    await reportSyncAlert({ kind: "cas_conflicts", isBad: false });
   }
 
   const verifyResult = await verifyPush();

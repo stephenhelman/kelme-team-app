@@ -24,6 +24,8 @@ import { adminCookieName, isValidAdminToken } from "@/lib/admin-auth";
 //                  processes only the first N of this run's candidates
 //                  (omit for "all"), logging to
 //                  shopify-inventory-push-log.jsonl for audit.
+//                  Optional &styleCode=X narrows push-dry-run / push-execute
+//                  to a single product.
 //   verify       — re-pulls from Shopify, confirms every checked variant's
 //                  on_hand matches DB qty.
 //   location     — just the location confirmation, on its own.
@@ -37,6 +39,8 @@ export async function GET(req: NextRequest) {
   const mode = searchParams.get("mode") ?? "pull-dry";
   const chunkSizeParam = searchParams.get("chunkSize");
   const sampleSizeParam = searchParams.get("sampleSize");
+  // Optional: narrow push-dry-run / push-execute to one product.
+  const styleCode = searchParams.get("styleCode") ?? undefined;
 
   try {
     if (mode === "pull-dry") {
@@ -52,7 +56,7 @@ export async function GET(req: NextRequest) {
     }
 
     if (mode === "push-dry-run") {
-      const result = await dryRunPush();
+      const result = await dryRunPush(styleCode);
       return NextResponse.json(result);
     }
 
@@ -61,7 +65,7 @@ export async function GET(req: NextRequest) {
       if (chunkSizeParam && (!Number.isFinite(chunkSize) || chunkSize! <= 0)) {
         throw new Error(`Invalid chunkSize "${chunkSizeParam}"`);
       }
-      const result = await executePush(chunkSize);
+      const result = await executePush({ chunkSize, styleCode });
       return NextResponse.json(result);
     }
 

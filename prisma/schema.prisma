@@ -185,7 +185,7 @@ model SyncStatus {
 }
 
 // Dedup state for admin sync alerts (lib/admin-notify.ts), one row per alert
-// kind ("sanity_halt" | "sync_failure" | "push_failures" | "stale_heartbeat").
+// kind ("sanity_halt" | "sync_failure" | "push_failures" | "cas_conflicts" | "stale_heartbeat").
 // Mirrors KelmeToken.deadNotifiedAt's "send once per bad spell" pattern, but
 // generalized: `active` tracks whether the kind is currently in a bad state,
 // and lastNotifiedAt gates re-sending a reminder while it persists, instead

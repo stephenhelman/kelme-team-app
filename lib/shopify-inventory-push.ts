@@ -17,8 +17,15 @@
  *                    writes are absolute SETs, not deltas.
  *   - verifyPush   — re-pulls from Shopify, confirms every pushed variant
  *                    landed at its target quantity.
+ *
+ * Writes are compare-and-swap: each quantity carries changeFromQuantity =
+ * the on_hand we read from Shopify moments earlier, so a write never
+ * clobbers a quantity that changed in between (a sale, a manual edit). A
+ * stale item is skipped, not overwritten — see executePush. Each batch also
+ * carries an @idempotent key so a retried batch can't apply twice.
  */
 import { appendFile } from "fs/promises";
+import { createHash } from "crypto";
 import path from "path";
 import { prisma } from "@/lib/prisma";
 import { shopifyGraphQL } from "@/lib/shopify";
@@ -174,11 +181,13 @@ export interface DryRunPushResult {
   trackingDisabledCount: number;
 }
 
-export async function dryRunPush(): Promise<DryRunPushResult> {
+// styleCode narrows the whole run to a single product (used for supervised
+// single-product test cycles); omit for the full catalog.
+export async function dryRunPush(styleCode?: string): Promise<DryRunPushResult> {
   const location = await confirmLocation();
 
   const variants = await prisma.variant.findMany({
-    where: { product: { onShopify: true } },
+    where: { product: { onShopify: true, ...(styleCode ? { styleCode } : {}) } },
     select: { id: true, sku: true, qty: true, shopifyInventoryItemId: true },
   });
 
@@ -265,14 +274,14 @@ async function enableTracking(inventoryItemGid: string): Promise<void> {
   if (payload.userErrors.length > 0) throw new Error(`inventoryItemUpdate userErrors: ${JSON.stringify(payload.userErrors)}`);
 }
 
-// No @idempotent directive — this store is pinned to API version 2025-04
-// (lib/shopify.ts's SHOPIFY_API_VERSION, from .env), which predates the
-// directive entirely ("Directive @idempotent is not defined", confirmed
-// live). The directive only becomes optional at 2026-01 and required at
-// 2026-04 — neither applies here.
+// API 2026-04+ requires BOTH an @idempotent(key:) directive on this mutation
+// and a changeFromQuantity on every quantity (explicit null = opt out of the
+// compare-and-swap check; omitting it is an error). 2026-01 accepts the key
+// optionally. ignoreCompareQuantity / compareQuantity no longer exist on the
+// input. Confirmed by introspection against 2026-01, 2026-04 and 2026-10.
 const SET_QUANTITIES_MUTATION = `
-  mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
-    inventorySetQuantities(input: $input) {
+  mutation inventorySetQuantities($input: InventorySetQuantitiesInput!, $idempotencyKey: String!) {
+    inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
       inventoryAdjustmentGroup {
         changes { name delta quantityAfterChange }
       }
@@ -283,7 +292,7 @@ const SET_QUANTITIES_MUTATION = `
 interface SetQuantitiesResponse {
   inventorySetQuantities: {
     inventoryAdjustmentGroup: { changes: { name: string; delta: number; quantityAfterChange: number | null }[] } | null;
-    userErrors: { field: string[] | null; message: string; code: string }[];
+    userErrors: { field: string[] | null; message: string; code: string | null }[];
   };
 }
 
@@ -291,13 +300,50 @@ function isThrottled(message: string): boolean {
   return /throttled/i.test(message);
 }
 
-async function setQuantitiesWithBackoff(
-  quantities: { inventoryItemId: string; locationId: string; quantity: number }[],
-): Promise<void> {
+interface QuantityWrite {
+  inventoryItemId: string;
+  locationId: string;
+  quantity: number;
+  // The on_hand we last read from Shopify for this item. null only when there
+  // was nothing to read (no level at this location yet) — an explicit,
+  // deliberate opt-out of the check, never a default.
+  changeFromQuantity: number | null;
+}
+
+// Deterministic UUID-shaped key from (cycle, chunk, exact payload). Retrying
+// the identical chunk — a throttle backoff, a crashed-and-rerun cycle with the
+// same id — reuses the key, so Shopify returns the original result instead of
+// applying twice. The payload is part of the hash on purpose: re-submitting a
+// chunk after dropping CAS-stale items is a different request, and reusing
+// the old key for it would be IDEMPOTENCY_KEY_PARAMETER_MISMATCH.
+function idempotencyKeyFor(scope: string, quantities: QuantityWrite[]): string {
+  const h = createHash("sha256").update(JSON.stringify([scope, quantities])).digest("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+}
+
+// Indexes into `quantities` that Shopify reported as CAS-stale, parsed from
+// the userError field path (["input","quantities","<i>","changeFromQuantity"]).
+function staleIndexesOf(errors: { field: string[] | null; code: string | null }[], count: number): number[] | null {
+  const indexes = new Set<number>();
+  for (const e of errors) {
+    if (e.code !== "CHANGE_FROM_QUANTITY_STALE") return null; // mixed errors — not a pure CAS conflict
+    const idx = Number(e.field?.find((part, i) => i > 0 && e.field![i - 1] === "quantities"));
+    if (!Number.isInteger(idx) || idx < 0 || idx >= count) return null; // can't attribute — treat batch as failed
+    indexes.add(idx);
+  }
+  return [...indexes];
+}
+
+// Returns the indexes that were skipped as CAS-stale (nothing written for
+// them). When ANY item is stale the whole mutation is rejected with
+// userErrors — it is all-or-nothing — so the caller re-submits the rest.
+async function setQuantitiesWithBackoff(quantities: QuantityWrite[], keyScope: string): Promise<{ staleIndexes: number[] }> {
   const maxAttempts = 5;
+  const idempotencyKey = idempotencyKeyFor(keyScope, quantities);
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const res = await shopifyGraphQL<SetQuantitiesResponse>(SET_QUANTITIES_MUTATION, {
-      input: { name: "on_hand", reason: "correction", quantities, ignoreCompareQuantity: true },
+      input: { name: "on_hand", reason: "correction", quantities },
+      idempotencyKey,
     });
 
     if (res.errors?.length) {
@@ -312,13 +358,16 @@ async function setQuantitiesWithBackoff(
     if (!payload) throw new Error(`inventorySetQuantities returned no payload: ${JSON.stringify(res)}`);
     if (payload.userErrors.length > 0) {
       const message = JSON.stringify(payload.userErrors);
-      if (isThrottled(message) && attempt < maxAttempts - 1) {
+      const retryable = isThrottled(message) || payload.userErrors.every((e) => e.code === "IDEMPOTENCY_CONCURRENT_REQUEST");
+      if (retryable && attempt < maxAttempts - 1) {
         await sleep(1000 * 2 ** attempt);
         continue;
       }
+      const staleIndexes = staleIndexesOf(payload.userErrors, quantities.length);
+      if (staleIndexes) return { staleIndexes };
       throw new Error(`inventorySetQuantities userErrors: ${message}`);
     }
-    return;
+    return { staleIndexes: [] };
   }
   throw new Error(`inventorySetQuantities exhausted retries (still throttled)`);
 }
@@ -327,7 +376,10 @@ export interface InventoryPushLogEntry {
   variantId: number;
   inventoryItemGid: string;
   targetQty: number;
-  status: "ok" | "failed";
+  // "conflict" = compare-and-swap mismatch: Shopify's on_hand changed between
+  // our read and our write, so we deliberately did NOT overwrite it. Not a
+  // failure — the next cycle re-reads and retries.
+  status: "ok" | "failed" | "conflict";
   message?: string;
   at: string;
 }
@@ -345,7 +397,19 @@ export interface ExecutePushReport {
   remaining: number;
   ok: number;
   failed: number;
+  // Items skipped because Shopify's on_hand moved after we read it (CAS
+  // mismatch). Counted apart from `failed` — a conflict is Shopify being
+  // right, not the push being broken.
+  casConflicts: number;
   entries: InventoryPushLogEntry[];
+}
+
+export interface ExecutePushOptions {
+  chunkSize?: number;
+  // Scopes idempotency keys — pass one stable id per sync cycle (and a
+  // distinct one for an in-cycle retry pass). Defaults to a fresh timestamp.
+  cycleId?: string;
+  styleCode?: string;
 }
 
 // Processes at most `chunkSize` of this run's candidates per call (default:
@@ -362,8 +426,10 @@ export interface ExecutePushReport {
 // inventory worker), would be silently frozen at its stale Shopify value
 // forever, since its id was already marked "done". Full runs take ~25s, so
 // resumability wasn't worth that bug class.
-export async function executePush(chunkSize?: number): Promise<ExecutePushReport> {
-  const dryRun = await dryRunPush();
+export async function executePush(options: ExecutePushOptions = {}): Promise<ExecutePushReport> {
+  const { chunkSize, styleCode } = options;
+  const cycleId = options.cycleId ?? `manual-${new Date().toISOString()}`;
+  const dryRun = await dryRunPush(styleCode);
   if (!dryRun.location.found || !dryRun.location.matchesExpectedAddress) {
     throw new Error(
       `Cannot execute — location confirmation failed (found=${dryRun.location.found}, ` +
@@ -382,6 +448,7 @@ export async function executePush(chunkSize?: number): Promise<ExecutePushReport
     remaining: 0,
     ok: 0,
     failed: 0,
+    casConflicts: 0,
     entries: [],
   };
 
@@ -403,13 +470,39 @@ export async function executePush(chunkSize?: number): Promise<ExecutePushReport
   }
 
   const writable = toProcess.filter((v) => !trackingFailedIds.has(v.variantId));
-  for (const batch of chunk(writable, SET_QUANTITIES_CHUNK)) {
+  const chunks = chunk(writable, SET_QUANTITIES_CHUNK);
+  for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+    const batch = chunks[chunkIndex];
     const at = new Date().toISOString();
+    const conflicts: PushCandidate[] = [];
+    let remaining = batch;
     try {
-      await setQuantitiesWithBackoff(
-        batch.map((v) => ({ inventoryItemId: v.inventoryItemGid, locationId: INVENTORY_LOCATION_ID, quantity: v.targetQty })),
-      );
-      const entries: InventoryPushLogEntry[] = batch.map((v) => ({
+      // One stale item rejects the whole mutation, so peel off the
+      // conflicts and re-submit the rest. Bounded: a run of fresh conflicts
+      // every round means something is actively churning inventory.
+      for (let round = 0; remaining.length > 0 && round < 5; round += 1) {
+        const { staleIndexes } = await setQuantitiesWithBackoff(
+          remaining.map((v) => ({
+            inventoryItemId: v.inventoryItemGid,
+            locationId: INVENTORY_LOCATION_ID,
+            quantity: v.targetQty,
+            changeFromQuantity: v.currentOnHand,
+          })),
+          `${cycleId}:chunk-${chunkIndex}`,
+        );
+        if (staleIndexes.length === 0) {
+          remaining = [];
+          break;
+        }
+        const stale = new Set(staleIndexes);
+        conflicts.push(...remaining.filter((_, i) => stale.has(i)));
+        remaining = remaining.filter((_, i) => !stale.has(i));
+        await sleep(CALL_PACING_MS);
+      }
+      if (remaining.length > 0) throw new Error("CAS conflicts persisted across 5 re-submit rounds — batch abandoned");
+
+      const written = batch.filter((v) => !conflicts.includes(v));
+      const entries: InventoryPushLogEntry[] = written.map((v) => ({
         variantId: v.variantId,
         inventoryItemGid: v.inventoryItemGid,
         targetQty: v.targetQty,
@@ -418,11 +511,12 @@ export async function executePush(chunkSize?: number): Promise<ExecutePushReport
       }));
       await appendLog(entries);
       report.entries.push(...entries);
-      report.processedThisRun += batch.length;
-      report.ok += batch.length;
+      report.processedThisRun += written.length;
+      report.ok += written.length;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      const entries: InventoryPushLogEntry[] = batch.map((v) => ({
+      const failedItems = batch.filter((v) => !conflicts.includes(v));
+      const entries: InventoryPushLogEntry[] = failedItems.map((v) => ({
         variantId: v.variantId,
         inventoryItemGid: v.inventoryItemGid,
         targetQty: v.targetQty,
@@ -432,8 +526,38 @@ export async function executePush(chunkSize?: number): Promise<ExecutePushReport
       }));
       await appendLog(entries);
       report.entries.push(...entries);
-      report.processedThisRun += batch.length;
-      report.failed += batch.length;
+      report.processedThisRun += failedItems.length;
+      report.failed += failedItems.length;
+    }
+
+    if (conflicts.length > 0) {
+      // Re-read what Shopify holds now so the log says what actually
+      // happened. Nothing is overwritten and nothing retried here — the next
+      // cycle recomputes candidates from a fresh read.
+      let fresh = new Map<string, CurrentInventoryState>();
+      try {
+        fresh = await fetchCurrentInventoryState(conflicts.map((v) => v.inventoryItemGid));
+      } catch (err) {
+        console.error(`[shopify-inventory-push] CAS re-read failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      const entries: InventoryPushLogEntry[] = conflicts.map((v) => {
+        const now = fresh.get(v.inventoryItemGid)?.currentOnHand;
+        return {
+          variantId: v.variantId,
+          inventoryItemGid: v.inventoryItemGid,
+          targetQty: v.targetQty,
+          status: "conflict",
+          message: `CAS mismatch: expected on_hand ${v.currentOnHand}, Shopify now has ${now ?? "unknown"} — not overwritten, next cycle retries`,
+          at,
+        };
+      });
+      for (const e of entries.slice(0, 20)) {
+        console.warn(`[shopify-inventory-push] CAS conflict sku-variant=${e.variantId} ${e.inventoryItemGid}: ${e.message}`);
+      }
+      await appendLog(entries);
+      report.entries.push(...entries);
+      report.processedThisRun += entries.length;
+      report.casConflicts += entries.length;
     }
     await sleep(CALL_PACING_MS);
   }
@@ -461,7 +585,7 @@ export async function executePush(chunkSize?: number): Promise<ExecutePushReport
 
   console.log(
     `[shopify-inventory-push] EXECUTE candidates=${report.candidates} ` +
-      `processedThisRun=${report.processedThisRun} remaining=${report.remaining} ok=${report.ok} failed=${report.failed} ` +
+      `processedThisRun=${report.processedThisRun} remaining=${report.remaining} ok=${report.ok} failed=${report.failed} casConflicts=${report.casConflicts} ` +
       `trackingEnabled=${report.trackingEnabled} trackingFailed=${report.trackingFailed.length}`,
   );
 

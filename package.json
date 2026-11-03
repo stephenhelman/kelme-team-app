@@ -13,7 +13,8 @@
     "db:studio": "prisma studio",
     "kelme-test": "node --env-file=.env kelme-token-test/index.js",
     "worker": "tsx worker/index.ts",
-    "alert:test": "tsx --env-file=.env scripts/test-alert.mjs"
+    "alert:test": "tsx --env-file=.env scripts/test-alert.mjs",
+    "push:product": "tsx --env-file=.env scripts/push-product.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
