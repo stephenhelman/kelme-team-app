@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { CORE_TAG, computeTargetTags } from "../lib/shopify-tags";
 import { colorBelongsToTitle, matchingStyleCodes, pickSubProduct, titleBaseGroup, titleHasStyleCode } from "../lib/style-match";
 
 test("exact suffixed code matches only itself", () => {
@@ -45,3 +46,10 @@ test("pickSubProduct narrows a split family by group, stays ambiguous without on
   assert.equal(pickSubProduct(plain, "White Base").length, 1);
 });
 
+test("tag target adds core and never strips existing tags", () => {
+  const out = computeTargetTags(["Soccer Uniform", "customizable-tops", "Kids"], "adults");
+  assert.ok(out.includes(CORE_TAG));
+  assert.ok(out.includes("Adults") && !out.includes("Kids"));
+  assert.ok(out.includes("Soccer Uniform") && out.includes("customizable-tops"));
+  assert.equal(computeTargetTags(["core", "Adults"], "adults").filter((t) => t === "core").length, 1);
+});

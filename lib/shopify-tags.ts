@@ -173,11 +173,21 @@ export function classifyAudience(name: string, gender?: string | null, subCatego
 
 const AGE_TAG_RE = /^(kids|adults)$/i;
 
+// Tags every real product must carry. "core" is what the checkout's
+// 25-item minimum counts, so a product without it silently falls outside
+// the minimum. Tag writes below send the FULL tag array (productUpdate
+// replaces, it does not merge) — computeTargetTags is therefore built from
+// the product's CURRENT tags so nothing is ever stripped except the
+// Kids/Adults pair being swapped.
+export const CORE_TAG = "core";
+
 export function computeTargetTags(currentTags: string[], audience: "kids" | "adults"): string[] {
   const nonAgeTags = currentTags.filter((t) => !AGE_TAG_RE.test(t));
   const ageTag = audience === "kids" ? "Kids" : "Adults";
-  return [ageTag, ...nonAgeTags];
+  const withCore = nonAgeTags.some((t) => t.toLowerCase() === CORE_TAG) ? nonAgeTags : [...nonAgeTags, CORE_TAG];
+  return [ageTag, ...withCore];
 }
+
 function parseTags(raw: string): string[] {
   return raw
     .split(",")
@@ -364,6 +374,14 @@ export async function executeTags(styleCode: string, exactTitle?: string, group?
       changed: false,
       matchesTarget: true,
     };
+  }
+
+  // Never strip: productUpdate REPLACES the tag list, so refuse to send one
+  // that drops any existing non-age tag (belt-and-braces over computeTargetTags).
+  const targetLower = new Set(dryRun.targetTags.map((t) => t.toLowerCase()));
+  const stripped = dryRun.currentTags.filter((t) => !AGE_TAG_RE.test(t) && !targetLower.has(t.toLowerCase()));
+  if (stripped.length > 0) {
+    throw new Error(`Refusing tag write — would strip existing tags: ${JSON.stringify(stripped)}`);
   }
 
   const input = {
