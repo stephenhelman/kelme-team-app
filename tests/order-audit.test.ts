@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { auditOrder, digitCount, expectedFeesForLine, parseCustomization, placementMultiplier } from "../lib/order-audit";
+import { auditOrder, digitCount, feeKindOf, expectedFeesForLine, parseCustomization, placementMultiplier } from "../lib/order-audit";
 import * as fx from "./fixtures";
 
 const codes = (r: ReturnType<typeof auditOrder>) => r.flags.map((f) => f.code);
@@ -12,11 +12,13 @@ test("digitCount counts digits only", () => {
   assert.equal(digitCount(""), 0);
 });
 
-test("placement: Both doubles; blank is x1; anything else is unconfirmed (x1)", () => {
+test("placement: Jersey/Shorts x1, Both x2, blank x1, anything else unconfirmed (x1)", () => {
+  assert.deepEqual(placementMultiplier("Jersey"), { multiplier: 1, known: true });
+  assert.deepEqual(placementMultiplier("Shorts"), { multiplier: 1, known: true });
   assert.deepEqual(placementMultiplier("Both"), { multiplier: 2, known: true });
   assert.deepEqual(placementMultiplier("both "), { multiplier: 2, known: true });
   assert.deepEqual(placementMultiplier(""), { multiplier: 1, known: true });
-  assert.deepEqual(placementMultiplier("Front"), { multiplier: 1, known: false });
+  assert.deepEqual(placementMultiplier("Sleeve"), { multiplier: 1, known: false });
 });
 
 test("#1028: expected fees match observed units (50 heat, 82 number digits, 25 names)", () => {
@@ -106,4 +108,25 @@ test("non-Shopify logo URL is flagged as suspicious", () => {
   const order = structuredClone(fx.order1028);
   order.line_items[0].properties.find((p) => p.name === "Logo")!.value = "https://evil.example.com/uploads/x.png";
   assert.ok(codes(auditOrder(order, fx.tags)).includes("LOGO_URL_SUSPICIOUS"));
+});
+
+test("fee line titles: all four real product titles classify", () => {
+  const kind = (title: string) => feeKindOf({ title } as never);
+  assert.equal(kind("Name Customization"), "name");
+  assert.equal(kind("Number Customization"), "number");
+  assert.equal(kind("Patch Product"), "patch");
+  assert.equal(kind("Heat Transfer Product"), "heat");
+});
+
+test("Jersey / Shorts placement does not double fees", () => {
+  for (const placement of ["Jersey", "Shorts"]) {
+    const order = structuredClone(fx.order1028);
+    for (const l of order.line_items) {
+      for (const p of l.properties) if (p.name === "Logo Placement" || p.name === "Number Placement") p.value = placement;
+    }
+    // single placement: 25 heat units / 41 number digits expected, but 50 / 82 were charged -> overcharge, no shortfall, no flags
+    const r = auditOrder(order, fx.tags);
+    assert.ok(!codes(r).includes("UNKNOWN_PLACEMENT"));
+    assert.deepEqual(r.fees.map((f) => f.expectedUnits), [25, 41, 25]);
+  }
 });

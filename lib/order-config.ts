@@ -22,17 +22,16 @@ export interface FeeKindConfig {
   /**
    * Fee products are recognised by FEE_TAG, but the tag doesn't say WHICH fee
    * a line is — that's matched on the product title (first match in
-   * FEE_KIND_ORDER wins). Observed titles: "Name Customization",
-   * "Number Customization", "Heat Transfer Product"; the Patch product's
-   * title is assumed to contain "patch". A fee-tagged line matching none of
-   * these is flagged, never silently ignored.
+   * FEE_KIND_ORDER wins). Confirmed titles: "Name Customization",
+   * "Number Customization", "Patch Product", "Heat Transfer Product". A
+   * fee-tagged line matching none of these is flagged, never silently ignored.
    */
   titlePattern: RegExp;
 }
 
 export const FEE_KINDS: Record<FeeKind, FeeKindConfig> = {
   patch: { label: "Patch logo", unit: "logo", rate: 4.0, titlePattern: /patch/i },
-  heat: { label: "Heat Transfer logo", unit: "logo", rate: 2.9, titlePattern: /heat\s*transfer/i },
+  heat: { label: "Heat Transfer logo", unit: "logo", rate: 2.9, titlePattern: /heat/i },
   number: { label: "Numbers", unit: "digit", rate: 2.0, titlePattern: /number/i },
   name: { label: "Names", unit: "name", rate: 2.0, titlePattern: /name/i },
 };
@@ -41,12 +40,16 @@ export const FEE_KINDS: Record<FeeKind, FeeKindConfig> = {
 export const FEE_KIND_ORDER: FeeKind[] = ["heat", "patch", "number", "name"];
 
 /**
- * Placement values (Logo Placement / Number Placement line properties) that
- * multiply a fee's units, keyed lowercase. Only "Both" is confirmed (logo and
- * number fees double). Any other non-blank value is treated as x1 AND flagged
- * as unconfirmed rather than guessed — add confirmed values here.
+ * Placement values (Logo Placement / Number Placement line properties) and
+ * the factor they apply to that fee's units, keyed lowercase. Confirmed set:
+ * Jersey (top only) and Shorts (bottom only) are x1; Both (a full set, top
+ * and bottom) is x2. Name fees have no placement (names go on tops only), so
+ * they are never multiplied. Any other non-blank value is treated as x1 AND
+ * flagged as unrecognized rather than guessed.
  */
 export const PLACEMENT_MULTIPLIERS: Record<string, number> = {
+  jersey: 1,
+  shorts: 1,
   both: 2,
 };
 
