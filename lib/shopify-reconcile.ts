@@ -613,6 +613,9 @@ export function buildMutationInput(
   sizeValues: OptionValueTarget[],
   target: TargetVariant[],
   sizeOptionName: string | null = "Size",
+  // Draft creation only: a per-variant placeholder price. Existing reconcile
+  // callers omit it, so their productSet payloads are unchanged.
+  priceFor?: (t: TargetVariant) => string,
 ) {
   const productOptions = [{ name: "Color", position: 1, values: colorValues.map((v) => ({ name: v.name })) }];
   if (sizeOptionName !== null) {
@@ -623,6 +626,7 @@ export function buildMutationInput(
     productOptions,
     variants: target.map((t) => ({
       sku: buildSku(t.styleCode, t.colorCode, t.size),
+      ...(priceFor ? { price: priceFor(t) } : {}),
       optionValues:
         sizeOptionName === null
           ? [{ optionName: "Color", name: colorOptionValue(t.colorName, t.colorCode), linkedMetafieldValue: t.colorGid }]
@@ -640,10 +644,11 @@ export async function setShopifyProductStructure(
   sizeValues: OptionValueTarget[],
   target: TargetVariant[],
   sizeOptionName: string | null = "Size",
+  priceFor?: (t: TargetVariant) => string,
 ): Promise<number> {
   const resolved = await ensureOptionValuesExist(shopifyProductId, colorValues, sizeValues, sizeOptionName);
 
-  const input = buildMutationInput(shopifyProductId, colorValues, sizeValues, target, resolved.sizeOptionName);
+  const input = buildMutationInput(shopifyProductId, colorValues, sizeValues, target, resolved.sizeOptionName, priceFor);
   const identifier = productSetIdentifier(shopifyProductId);
 
   console.log(

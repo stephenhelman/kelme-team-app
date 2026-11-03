@@ -130,13 +130,13 @@ interface NodesResponse {
   nodes: (InventoryItemNode | null)[];
 }
 
-interface CurrentInventoryState {
+export interface CurrentInventoryState {
   inventoryItemGid: string;
   tracked: boolean;
   currentOnHand: number | null; // null = no inventory level at this location yet
 }
 
-async function fetchCurrentInventoryState(inventoryItemGids: string[]): Promise<Map<string, CurrentInventoryState>> {
+export async function fetchCurrentInventoryState(inventoryItemGids: string[]): Promise<Map<string, CurrentInventoryState>> {
   const result = new Map<string, CurrentInventoryState>();
   for (const batch of chunk(inventoryItemGids, NODES_CHUNK)) {
     const res = await shopifyGraphQL<NodesResponse>(NODES_QUERY, { ids: batch, locationId: INVENTORY_LOCATION_ID });
@@ -263,7 +263,7 @@ interface EnableTrackingResponse {
   inventoryItemUpdate: { inventoryItem: { id: string; tracked: boolean } | null; userErrors: { field: string[] | null; message: string }[] };
 }
 
-async function enableTracking(inventoryItemGid: string): Promise<void> {
+export async function enableTracking(inventoryItemGid: string): Promise<void> {
   const res = await shopifyGraphQL<EnableTrackingResponse>(ENABLE_TRACKING_MUTATION, {
     id: inventoryItemGid,
     input: { tracked: true },
@@ -337,7 +337,7 @@ function staleIndexesOf(errors: { field: string[] | null; code: string | null }[
 // Returns the indexes that were skipped as CAS-stale (nothing written for
 // them). When ANY item is stale the whole mutation is rejected with
 // userErrors — it is all-or-nothing — so the caller re-submits the rest.
-async function setQuantitiesWithBackoff(quantities: QuantityWrite[], keyScope: string): Promise<{ staleIndexes: number[] }> {
+export async function setQuantitiesWithBackoff(quantities: QuantityWrite[], keyScope: string): Promise<{ staleIndexes: number[] }> {
   const maxAttempts = 5;
   const idempotencyKey = idempotencyKeyFor(keyScope, quantities);
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {

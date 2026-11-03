@@ -73,6 +73,31 @@ export function familyConflictsFor(
   return out;
 }
 
+// Re-captures one product from Kelme into the DB (Product, Variants, colors/
+// sizes declaration, attributes) and drops variant rows outside the freshly
+// declared colors × sizes. Kelme calls ride lib/kelme.ts's DB-backed token
+// path. Throws on a dead Kelme session so callers can stop the run.
+export async function recaptureProduct(c: { id: number; pdtid: number; styleCode: string }): Promise<{ dropNotes: string[]; error?: string }> {
+  const cap = await captureProduct(c.pdtid);
+  const dropNotes = cap.warnings.filter((w) => /allow-list|unmapped size/.test(w));
+  if (!cap.ok) return { dropNotes, error: cap.error ?? "capture failed" };
+  await sleep(CALL_PACING_MS);
+  const decl = await pullProductDeclaration(c.pdtid, c.styleCode);
+  if (decl.ok) {
+    // Variants are DERIVED from the declaration: drop rows outside the
+    // freshly declared colors × sizes (stale combos).
+    await prisma.variant.deleteMany({
+      where: {
+        productId: c.id,
+        OR: [{ colorCode: { notIn: decl.colorsWritten.map((x) => x.colorCode) } }, { shopifySize: { notIn: decl.sizesWritten } }],
+      },
+    });
+  }
+  await sleep(CALL_PACING_MS);
+  await captureProductAttributes(c.pdtid);
+  return { dropNotes };
+}
+
 export interface PreflightRun {
   generatedAt: string;
   captured: boolean;
@@ -114,26 +139,9 @@ export async function runPreflight(opts: { capture: boolean; only?: string[] }):
       const c = candidates[i];
       console.log(`[preflight] recapture (${i + 1}/${candidates.length}) ${c.styleCode} pdtid=${c.pdtid}`);
       try {
-        const cap = await captureProduct(c.pdtid);
-        dropNotes.set(c.styleCode, cap.warnings.filter((w) => /allow-list|unmapped size/.test(w)));
-        if (!cap.ok) {
-          run.captureErrors.push({ styleCode: c.styleCode, error: cap.error ?? "capture failed" });
-        } else {
-          await sleep(CALL_PACING_MS);
-          const decl = await pullProductDeclaration(c.pdtid, c.styleCode);
-          if (decl.ok) {
-            // Variants are DERIVED from the declaration: drop rows outside
-            // the freshly declared colors × sizes (stale combos).
-            await prisma.variant.deleteMany({
-              where: {
-                productId: c.id,
-                OR: [{ colorCode: { notIn: decl.colorsWritten.map((x) => x.colorCode) } }, { shopifySize: { notIn: decl.sizesWritten } }],
-              },
-            });
-          }
-          await sleep(CALL_PACING_MS);
-          await captureProductAttributes(c.pdtid);
-        }
+        const rc = await recaptureProduct(c);
+        dropNotes.set(c.styleCode, rc.dropNotes);
+        if (rc.error) run.captureErrors.push({ styleCode: c.styleCode, error: rc.error });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         run.captureErrors.push({ styleCode: c.styleCode, error: message });
