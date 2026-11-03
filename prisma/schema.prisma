@@ -197,3 +197,34 @@ model SyncAlert {
   lastNotifiedAt DateTime?
   updatedAt      DateTime  @updatedAt
 }
+
+enum OrderFileStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+}
+
+// One row per paid Shopify order, inserted by the orders/paid webhook
+// (app/shopify/webhooks/orders-paid) and worked off by the Railway worker
+// (lib/order-file-worker.ts), which audits the order and emails the vendor
+// the order sheet. shopifyOrderId @unique is the webhook's dedup: Shopify
+// delivers at-least-once, so a duplicate delivery hits the unique violation
+// and is treated as success. `payload` is the raw webhook body, kept so a
+// FAILED row can be retried or the audit re-run without re-fetching.
+model OrderFile {
+  id             Int             @id @default(autoincrement())
+  shopifyOrderId String          @unique
+  orderName      String // "#1028"
+  status         OrderFileStatus @default(PENDING)
+  attempts       Int             @default(0)
+  lockedAt       DateTime? // set when claimed; a stale PROCESSING lock is reclaimed
+  lastError      String?
+  auditFlags     Json? // AuditFlag[] from lib/order-audit.ts, set once processed
+  payload        Json
+  resendEmailId  String?
+  sentAt         DateTime?
+  createdAt      DateTime        @default(now())
+
+  @@index([status, lockedAt])
+}
