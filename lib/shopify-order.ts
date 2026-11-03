@@ -8,24 +8,8 @@
  */
 import { shopifyGraphQL } from "@/lib/shopify";
 
-export const CANONICAL_SIZE_ORDER = [
-  "4",
-  "6",
-  "8",
-  "10",
-  "12",
-  "14",
-  "16",
-  "2XS",
-  "XS",
-  "S",
-  "M",
-  "L",
-  "XL",
-  "2XL",
-  "3XL",
-  "One Size",
-];
+import { CANONICAL_SIZE_ORDER } from "@/lib/sizes";
+export { CANONICAL_SIZE_ORDER };
 
 function sizeRank(size: string): number {
   const idx = CANONICAL_SIZE_ORDER.indexOf(size);
