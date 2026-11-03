@@ -11,8 +11,12 @@ import { executePush, verifyPush } from "@/lib/shopify-inventory-push";
 import { executeRelink } from "@/lib/shopify-relink";
 import { reportSyncAlert } from "@/lib/admin-notify";
 import { recordSuccessfulSync } from "@/lib/sync-status";
+import { pollOrderFiles } from "@/lib/order-file-worker";
 
 const SYNC_INTERVAL_MS = 4 * 60 * 60 * 1000;
+// Order-intake poll (lib/order-file-worker.ts): short, since a paid order's
+// sheet should reach the vendor within about a minute. Independent of the sync.
+const ORDER_POLL_INTERVAL_MS = 60 * 1000;
 
 // A handful of failed variants in one push is typically transient
 // (rate-limit backoff, one bad batch) and self-recovers next cycle — not
@@ -168,6 +172,19 @@ async function runSyncSafely(): Promise<void> {
   }
 }
 
+let orderPollRunning = false;
+async function pollOrdersSafely(): Promise<void> {
+  if (orderPollRunning) return; // a slow poll must not overlap the next tick
+  orderPollRunning = true;
+  try {
+    await pollOrderFiles(log);
+  } catch (err) {
+    log(`order-file: poll failed: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    orderPollRunning = false;
+  }
+}
+
 process.on("SIGTERM", () => {
   console.log("[worker] SIGTERM received — shutting down cleanly");
   process.exit(0);
@@ -179,3 +196,7 @@ process.on("unhandledRejection", (reason) => {
 log(`worker: starting — sync every ${SYNC_INTERVAL_MS / (60 * 60 * 1000)}h`);
 runSyncSafely();
 setInterval(runSyncSafely, SYNC_INTERVAL_MS);
+
+log(`worker: order-file poll every ${ORDER_POLL_INTERVAL_MS / 1000}s`);
+pollOrdersSafely();
+setInterval(pollOrdersSafely, ORDER_POLL_INTERVAL_MS);
