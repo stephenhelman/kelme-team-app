@@ -14,7 +14,15 @@ import {
 import { prisma } from "./prisma";
 import type { Variant } from "@prisma/client";
 
-export const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION ?? "2026-07";
+// Single source of truth for the Admin API version. Bump this deliberately
+// (Shopify ships quarterly and supports each version ~12 months); only set
+// the SHOPIFY_API_VERSION env var to override it for a specific environment.
+// Shopify does NOT reject an unsupported version — it silently serves the
+// oldest supported one instead (a request pinned to 2025-04 was being
+// answered as 2026-01), so a stale env override means the pin you think
+// you have isn't the schema you're running against.
+export const DEFAULT_SHOPIFY_API_VERSION = "2026-10";
+export const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || DEFAULT_SHOPIFY_API_VERSION;
 export const SHOPIFY_SCOPES =
   "read_products,write_products,read_inventory,write_inventory,read_locations,read_metaobjects,read_metaobject_definitions,write_metaobjects";
 
