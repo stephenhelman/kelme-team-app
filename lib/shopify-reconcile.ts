@@ -120,8 +120,8 @@ export async function fetchOneShopifyProduct(id: number): Promise<ShopifyProduct
 // API 2026-07 — confirmed empirically, hence GraphQL here.
 
 const PRODUCT_SET_MUTATION = `
-  mutation productSet($input: ProductSetInput!, $synchronous: Boolean!) {
-    productSet(input: $input, synchronous: $synchronous) {
+  mutation productSet($input: ProductSetInput!, $identifier: ProductSetIdentifiers, $synchronous: Boolean!) {
+    productSet(input: $input, identifier: $identifier, synchronous: $synchronous) {
       product { id }
       productSetOperation { id status }
       userErrors { field message }
@@ -602,6 +602,13 @@ export interface OptionValueTarget {
 // from the GID supplied there, so the metaobject reference must be set on
 // every variant's optionValues entry, not on the top-level option
 // declaration.
+// The product being reconciled is addressed by productSet's separate
+// `identifier` argument — ProductSetInput itself has no `id` field as of API
+// 2026-01 (sending one is a schema error). Pass this alongside the input.
+export function productSetIdentifier(shopifyProductId: number): { id: string } {
+  return { id: shopifyProductGid(shopifyProductId) };
+}
+
 export function buildMutationInput(
   shopifyProductId: number,
   colorValues: OptionValueTarget[],
@@ -615,7 +622,6 @@ export function buildMutationInput(
   }
 
   return {
-    id: shopifyProductGid(shopifyProductId),
     productOptions,
     variants: target.map((t) => ({
       sku: buildSku(t.styleCode, t.colorCode, t.size),
@@ -640,14 +646,16 @@ export async function setShopifyProductStructure(
   const resolved = await ensureOptionValuesExist(shopifyProductId, colorValues, sizeValues, sizeOptionName);
 
   const input = buildMutationInput(shopifyProductId, colorValues, sizeValues, target, resolved.sizeOptionName);
+  const identifier = productSetIdentifier(shopifyProductId);
 
   console.log(
     `[shopify-reconcile] sending productSet mutation for product=${shopifyProductId}: ` +
-      `${PRODUCT_SET_MUTATION.trim()} variables=${JSON.stringify({ input, synchronous: target.length <= 100 })}`,
+      `${PRODUCT_SET_MUTATION.trim()} variables=${JSON.stringify({ input, identifier, synchronous: target.length <= 100 })}`,
   );
 
   const res = await shopifyGraphQL<ProductSetMutationResponse>(PRODUCT_SET_MUTATION, {
     input,
+    identifier,
     synchronous: target.length <= 100,
   });
 
@@ -937,6 +945,7 @@ export async function dryRunReconcile(styleCode: string, exactTitle?: string): P
   const diff = computeDiff(current, dbResult.target);
   const mutationVariables = {
     input: buildMutationInput(product.id, colorValues, sizeValues, dbResult.target),
+    identifier: productSetIdentifier(product.id),
     synchronous: dbResult.target.length <= 100,
   };
 
