@@ -26,7 +26,7 @@ export const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || DEFAULT_SH
 export const SHOPIFY_SCOPES =
   "read_products,write_products,read_inventory,write_inventory,read_locations,read_metaobjects,read_metaobject_definitions,write_metaobjects,read_orders";
 
-function shopDomain(): string {
+export function shopDomain(): string {
   const shop = process.env.SHOPIFY_SHOP;
   if (!shop) throw new Error("SHOPIFY_SHOP is not set");
   return shop.includes(".") ? shop : `${shop}.myshopify.com`;
