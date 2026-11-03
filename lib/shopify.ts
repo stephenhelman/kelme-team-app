@@ -24,7 +24,7 @@ import type { Variant } from "@prisma/client";
 export const DEFAULT_SHOPIFY_API_VERSION = "2026-10";
 export const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || DEFAULT_SHOPIFY_API_VERSION;
 export const SHOPIFY_SCOPES =
-  "read_products,write_products,read_inventory,write_inventory,read_locations,read_metaobjects,read_metaobject_definitions,write_metaobjects";
+  "read_products,write_products,read_inventory,write_inventory,read_locations,read_metaobjects,read_metaobject_definitions,write_metaobjects,read_orders";
 
 function shopDomain(): string {
   const shop = process.env.SHOPIFY_SHOP;
