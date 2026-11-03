@@ -12,8 +12,8 @@
  * batch failing) would become alert-fatigue noise.
  */
 import { prisma } from "./prisma";
+import { resendApiKey, sendEmail } from "./email";
 
-const RESEND_API_URL = "https://api.resend.com/emails";
 const DEFAULT_PERSIST_WINDOW_MS = 12 * 60 * 60 * 1000; // 12h
 
 /**
@@ -29,26 +29,12 @@ export async function sendTestAlert(): Promise<void> {
   );
 }
 
-async function sendAdminAlert(subject: string, text: string): Promise<void> {
-  const apiKey = process.env.RESEND_API_KEY;
+export async function sendAdminAlert(subject: string, text: string): Promise<void> {
+  resendApiKey();
   const to = process.env.ADMIN_NOTIFY_EMAIL;
-  const from = process.env.RESEND_FROM ?? "Kelme Team <noreply@kelmeteam.com>";
-  if (!apiKey) throw new Error("RESEND_API_KEY is not set");
   if (!to) throw new Error("ADMIN_NOTIFY_EMAIL is not set");
 
-  const res = await fetch(RESEND_API_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ from, to, subject, text }),
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Resend send failed: HTTP ${res.status} ${body}`);
-  }
+  await sendEmail({ to, subject, text });
 }
 
 export interface SyncAlertInput {
