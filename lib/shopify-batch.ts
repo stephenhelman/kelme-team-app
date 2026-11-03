@@ -18,6 +18,7 @@ import { dryRunReconcile, executeReconcile, type DryRunResult } from "@/lib/shop
 import { planSizeOrder, executeSizeOrder } from "@/lib/shopify-order";
 import { planMedia, executeMedia } from "@/lib/shopify-media";
 import { dryRunTags, executeTags } from "@/lib/shopify-tags";
+import type { BaseGroup } from "@/lib/shopify-split";
 
 const CALL_PACING_MS = 400;
 const BATCH_LOG_PATH = path.join(process.cwd(), "shopify-batch-log.jsonl");
@@ -43,8 +44,15 @@ export interface BatchDryRunResult {
   tags: { current: string[]; target: string[]; toAdd: string[]; toRemove: string[] } | null;
 }
 
-export async function dryRunBatch(styleCode: string): Promise<BatchDryRunResult> {
-  const [reconcile, tags] = await Promise.all([dryRunReconcile(styleCode), dryRunTags(styleCode)]);
+// `group` selects one sub-product of a split family ("(Black|White|Other
+// Base)" Shopify products sharing one base style code) — reconcile is then
+// limited to that group's colors. Without it, a split family stays
+// multi-candidate and is skipped as ambiguous, never guessed.
+export async function dryRunBatch(styleCode: string, group?: BaseGroup): Promise<BatchDryRunResult> {
+  const [reconcile, tags] = await Promise.all([
+    dryRunReconcile(styleCode, undefined, group),
+    dryRunTags(styleCode, undefined, group),
+  ]);
 
   const currentVariantCount = reconcile.current.length;
 
@@ -142,8 +150,8 @@ export interface BatchExecuteResult {
   overallOk: boolean;
 }
 
-export async function executeBatch(styleCode: string): Promise<BatchExecuteResult> {
-  const dryRun = await dryRunBatch(styleCode);
+export async function executeBatch(styleCode: string, group?: BaseGroup): Promise<BatchExecuteResult> {
+  const dryRun = await dryRunBatch(styleCode, group);
   if (dryRun.skipReason || dryRun.shopifyProductId === null) {
     throw new Error(`Cannot execute — ${dryRun.skipReason ?? "unknown skip reason"}`);
   }
@@ -157,7 +165,7 @@ export async function executeBatch(styleCode: string): Promise<BatchExecuteResul
   };
 
   try {
-    const r = await executeReconcile(styleCode);
+    const r = await executeReconcile(styleCode, undefined, group);
     steps.reconcile = r.afterMatchesTarget
       ? { ok: true }
       : { ok: false, error: `stillMissing=${r.stillMissing.length} stillExtra=${r.stillExtra.length}` };
@@ -188,7 +196,7 @@ export async function executeBatch(styleCode: string): Promise<BatchExecuteResul
     await sleep(CALL_PACING_MS);
 
     try {
-      const t = await executeTags(styleCode);
+      const t = await executeTags(styleCode, undefined, group);
       steps.tags = t.matchesTarget
         ? { ok: true }
         : { ok: false, error: "post-write tags did not match target on re-pull" };

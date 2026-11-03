@@ -21,15 +21,7 @@ import { prisma } from "@/lib/prisma";
 import { shopifyGraphQL } from "@/lib/shopify";
 import { parseColorCode } from "@/lib/shopify-reconcile";
 import { ONE_SIZE } from "@/lib/sku";
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function titleContainsStyleCode(title: string, styleCode: string): boolean {
-  const re = new RegExp(`(^|[^A-Za-z0-9])${escapeRegex(styleCode)}([^A-Za-z0-9]|$)`);
-  return re.test(title);
-}
+import { colorBelongsToTitle, matchingStyleCodes } from "@/lib/style-match";
 
 interface ShopifyProductNode {
   id: string;
@@ -118,7 +110,7 @@ async function buildShopifyIndex(dbStyleCodes: string[]): Promise<{
   const unlistedProducts: { productId: string; title: string; status: string; styleCode: string }[] = [];
 
   for (const product of products) {
-    const matches = dbStyleCodes.filter((sc) => titleContainsStyleCode(product.title, sc));
+    const matches = matchingStyleCodes(product.title, dbStyleCodes);
     if (matches.length === 0) continue; // no DB product claims this Shopify product — irrelevant here
     if (matches.length > 1) {
       ambiguousProducts.push({ productId: product.id, title: product.title, matchedStyleCodes: matches });
@@ -152,6 +144,11 @@ async function buildShopifyIndex(dbStyleCodes: string[]): Promise<{
       // truth for the string.
       const size = sizeOpt ? sizeOpt.value : ONE_SIZE;
 
+      // A "(Black|White|Other Base)" sub-product only owns its group's colors
+      // (baseGroup(colorCode)) — a stray off-group variant is left unmatched
+      // (surfaced via shopifyUnmatched) rather than linked to the wrong family.
+      const offGroup = colorCode !== null && !colorBelongsToTitle(product.title, colorCode);
+
       const flat: FlatShopifyVariant = {
         styleCode,
         colorCode,
@@ -163,7 +160,7 @@ async function buildShopifyIndex(dbStyleCodes: string[]): Promise<{
       };
       allFlat.push(flat);
 
-      if (!colorCode || !size) continue; // unparseable — surfaced via allFlat, not matchable by key
+      if (!colorCode || !size || offGroup) continue; // unparseable/off-group — surfaced via allFlat, not matchable by key
       const key = `${styleCode}::${colorCode}::${size}`;
       if (!byKey.has(key)) byKey.set(key, []);
       byKey.get(key)!.push(flat);

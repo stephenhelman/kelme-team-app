@@ -24,6 +24,8 @@
 import { appendFile, readFile } from "fs/promises";
 import path from "path";
 import { prisma } from "@/lib/prisma";
+import { pickSubProduct, titleHasStyleCode } from "@/lib/style-match";
+import type { BaseGroup } from "@/lib/shopify-split";
 import { shopifyAdminFetch, shopifyGraphQL, parseNextPageUrl } from "@/lib/shopify";
 
 const CALL_PACING_MS = 400;
@@ -31,10 +33,6 @@ const BATCH_LOG_PATH = path.join(process.cwd(), "shopify-tags-log.jsonl");
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 // --- Shopify REST shapes (tags only — no options/variants needed here) ---
@@ -69,17 +67,17 @@ async function fetchAllShopifyProducts(): Promise<ShopifyProduct[]> {
 // --- Matching Shopify products to DB products by styleCode (same
 // whole-word-boundary approach as lib/shopify-reconcile.ts) ---
 
-function findCandidates(styleCode: string, products: ShopifyProduct[]): ShopifyProduct[] {
-  const re = new RegExp(`(^|[^A-Za-z0-9])${escapeRegex(styleCode)}([^A-Za-z0-9]|$)`);
-  return products.filter((p) => re.test(p.title));
+function findCandidates(styleCode: string, products: ShopifyProduct[], group?: BaseGroup): ShopifyProduct[] {
+  return pickSubProduct(products.filter((p) => titleHasStyleCode(p.title, styleCode)), group);
 }
 
 function matchShopifyProduct(
   styleCode: string,
   products: ShopifyProduct[],
   exactTitle?: string,
+  group?: BaseGroup,
 ): { product: ShopifyProduct | null; candidateCount: number } {
-  const candidates = findCandidates(styleCode, products);
+  const candidates = findCandidates(styleCode, products, group);
   if (exactTitle) {
     const exact = candidates.find((p) => p.title === exactTitle);
     if (exact) return { product: exact, candidateCount: candidates.length };
@@ -175,12 +173,11 @@ export function classifyAudience(name: string, gender?: string | null, subCatego
 
 const AGE_TAG_RE = /^(kids|adults)$/i;
 
-function computeTargetTags(currentTags: string[], audience: "kids" | "adults"): string[] {
+export function computeTargetTags(currentTags: string[], audience: "kids" | "adults"): string[] {
   const nonAgeTags = currentTags.filter((t) => !AGE_TAG_RE.test(t));
   const ageTag = audience === "kids" ? "Kids" : "Adults";
   return [ageTag, ...nonAgeTags];
 }
-
 function parseTags(raw: string): string[] {
   return raw
     .split(",")
@@ -245,7 +242,7 @@ export interface DryRunTagsResult {
   flagReason: string | null;
 }
 
-export async function dryRunTags(styleCode: string, exactTitle?: string): Promise<DryRunTagsResult> {
+export async function dryRunTags(styleCode: string, exactTitle?: string, group?: BaseGroup): Promise<DryRunTagsResult> {
   const dbProduct = await prisma.product.findFirst({
     where: { styleCode },
     select: { name: true, gender: true, subCategory: true },
@@ -261,7 +258,7 @@ export async function dryRunTags(styleCode: string, exactTitle?: string): Promis
   );
 
   const products = await fetchAllShopifyProducts();
-  const { product, candidateCount } = matchShopifyProduct(styleCode, products, exactTitle);
+  const { product, candidateCount } = matchShopifyProduct(styleCode, products, exactTitle, group);
 
   if (!product) {
     return {
@@ -347,8 +344,8 @@ export interface ExecuteTagsResult {
   matchesTarget: boolean;
 }
 
-export async function executeTags(styleCode: string, exactTitle?: string): Promise<ExecuteTagsResult> {
-  const dryRun = await dryRunTags(styleCode, exactTitle);
+export async function executeTags(styleCode: string, exactTitle?: string, group?: BaseGroup): Promise<ExecuteTagsResult> {
+  const dryRun = await dryRunTags(styleCode, exactTitle, group);
 
   if (dryRun.flagged) {
     throw new Error(`Cannot execute — ${dryRun.flagReason}`);
@@ -395,7 +392,7 @@ export async function executeTags(styleCode: string, exactTitle?: string): Promi
 
   // Re-pull independently rather than trust the mutation's own echo.
   const products = await fetchAllShopifyProducts();
-  const { product } = matchShopifyProduct(styleCode, products, exactTitle);
+  const { product } = matchShopifyProduct(styleCode, products, exactTitle, group);
   const after = product ? parseTags(product.tags) : [];
 
   const result: ExecuteTagsResult = {

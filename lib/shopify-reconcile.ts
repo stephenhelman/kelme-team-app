@@ -16,6 +16,8 @@
 import { appendFile, readFile } from "fs/promises";
 import path from "path";
 import { prisma } from "@/lib/prisma";
+import { pickSubProduct, titleHasStyleCode } from "@/lib/style-match";
+import { baseGroup, type BaseGroup } from "@/lib/shopify-split";
 import { shopifyAdminFetch, shopifyGraphQL, parseNextPageUrl } from "@/lib/shopify";
 import { buildSku } from "@/lib/sku";
 
@@ -24,10 +26,6 @@ const BATCH_LOG_PATH = path.join(process.cwd(), "shopify-reconcile-log.jsonl");
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 // --- Shopify REST shapes ---
@@ -707,17 +705,17 @@ export async function setShopifyProductStructure(
 
 // --- Matching Shopify products to DB products by styleCode ---
 
-function findCandidates(styleCode: string, products: ShopifyProduct[]): ShopifyProduct[] {
-  const re = new RegExp(`(^|[^A-Za-z0-9])${escapeRegex(styleCode)}([^A-Za-z0-9]|$)`);
-  return products.filter((p) => re.test(p.title));
+function findCandidates(styleCode: string, products: ShopifyProduct[], group?: BaseGroup): ShopifyProduct[] {
+  return pickSubProduct(products.filter((p) => titleHasStyleCode(p.title, styleCode)), group);
 }
 
 function matchShopifyProduct(
   styleCode: string,
   products: ShopifyProduct[],
   exactTitle?: string,
+  group?: BaseGroup,
 ): { product: ShopifyProduct | null; candidateCount: number } {
-  const candidates = findCandidates(styleCode, products);
+  const candidates = findCandidates(styleCode, products, group);
   if (exactTitle) {
     const exact = candidates.find((p) => p.title === exactTitle);
     if (exact) return { product: exact, candidateCount: candidates.length };
@@ -764,6 +762,7 @@ function sizeOptionKindFor(productName: string): SizeOptionKind {
 
 export async function getDbTarget(
   styleCode: string,
+  group?: BaseGroup,
 ): Promise<{ productId: number; target: TargetVariant[]; sizeOptionName: string | null } | null> {
   const product = await prisma.product.findFirst({
     where: { styleCode },
@@ -771,8 +770,12 @@ export async function getDbTarget(
   });
   if (!product) return null;
 
-  const colorCodes = [...new Set(product.variants.map((v) => v.colorCode))];
-  const sizes = [...new Set(product.variants.map((v) => v.shopifySize))];
+  // A split-family sub-product is only ever reconciled against its own
+  // group's colors (baseGroup(colorCode)); without a group, the whole
+  // product is the target as before.
+  const variants = group ? product.variants.filter((v) => baseGroup(v.colorCode) === group) : product.variants;
+  const colorCodes = [...new Set(variants.map((v) => v.colorCode))];
+  const sizes = [...new Set(variants.map((v) => v.shopifySize))];
 
   // A product whose ONLY size is the literal "One Size" has no real size
   // dimension at all (equipment: backpacks, bags, markers, armbands, ...) —
@@ -792,7 +795,7 @@ export async function getDbTarget(
   const colorGidByCode = new Map(colors.map((c) => [c.colorCode, c.shopifyGid]));
   const sizeGidBySize = new Map(sizeRows.map((s) => [s.shopifySize, s[sizeGidField]]));
 
-  const target = product.variants.map((v) => ({
+  const target = variants.map((v) => ({
     styleCode,
     colorCode: v.colorCode,
     colorName: v.colorName,
@@ -911,14 +914,14 @@ export interface DryRunResult {
   mutationVariables: unknown;
 }
 
-export async function dryRunReconcile(styleCode: string, exactTitle?: string): Promise<DryRunResult> {
-  const dbResult = await getDbTarget(styleCode);
+export async function dryRunReconcile(styleCode: string, exactTitle?: string, group?: BaseGroup): Promise<DryRunResult> {
+  const dbResult = await getDbTarget(styleCode, group);
   if (!dbResult) {
     throw new Error(`No DB product found for styleCode "${styleCode}"`);
   }
 
   const products = await fetchAllShopifyProducts();
-  const { product, candidateCount } = matchShopifyProduct(styleCode, products, exactTitle);
+  const { product, candidateCount } = matchShopifyProduct(styleCode, products, exactTitle, group);
 
   const { colorValues, sizeValues, missingGids } = buildOptionValues(dbResult.target);
 
@@ -986,8 +989,8 @@ export interface ExecuteResult {
   stillExtra: { variantId: number; color: string | null; size: string | null }[]; // combos present but not in target
 }
 
-export async function executeReconcile(styleCode: string, exactTitle?: string): Promise<ExecuteResult> {
-  const dryRun = await dryRunReconcile(styleCode, exactTitle);
+export async function executeReconcile(styleCode: string, exactTitle?: string, group?: BaseGroup): Promise<ExecuteResult> {
+  const dryRun = await dryRunReconcile(styleCode, exactTitle, group);
   if (!dryRun.matched || dryRun.shopifyProductId === null) {
     throw new Error(
       `Cannot execute — no unambiguous Shopify match for styleCode "${styleCode}" (candidates=${dryRun.candidateCount})`,
