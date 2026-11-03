@@ -16,7 +16,8 @@
     "alert:test": "tsx --env-file=.env scripts/test-alert.mjs",
     "push:product": "tsx --env-file=.env scripts/push-product.ts",
     "test": "tsx --test tests/*.test.ts",
-    "webhook:register": "tsx --env-file=.env scripts/register-orders-webhook.ts"
+    "webhook:register": "tsx --env-file=.env scripts/register-orders-webhook.ts",
+    "drafts": "tsx --env-file=.env scripts/drafts.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",

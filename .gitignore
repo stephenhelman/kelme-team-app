@@ -57,3 +57,6 @@ inventory-fix
 *.log
 token-life.log
 size-inspection.txt
+# draft pre-flight output
+draft-preflight-report.md
+draft-preflight.json
