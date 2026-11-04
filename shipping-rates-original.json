@@ -1,0 +1,25 @@
+{
+  "id": "gid://shopify/DeliveryProfile/91014004932",
+  "name": "General profile",
+  "version": 5,
+  "locationGroupId": "gid://shopify/DeliveryLocationGroup/91607138500",
+  "currency": "USD",
+  "zones": [
+    {
+      "id": "gid://shopify/DeliveryZone/388606361796",
+      "name": "Domestic",
+      "methods": [
+        {
+          "id": "gid://shopify/DeliveryMethodDefinition/713400680644",
+          "name": "Request a quote",
+          "active": true,
+          "description": "",
+          "kind": "rate",
+          "price": "0.0",
+          "currency": "USD",
+          "conditions": []
+        }
+      ]
+    }
+  ]
+}
