@@ -1,5 +1,5 @@
 /**
- * Order audit: classifies an order's lines (core / customization-fee / other),
+ * Order audit: classifies an order's lines (core / customize_charge / other),
  * reads each customized line's properties, recomputes the customization fees
  * the order SHOULD carry, and compares them to the fee lines actually on it.
  * Pure — no I/O; tags and variant info are passed in (see order-file-worker).

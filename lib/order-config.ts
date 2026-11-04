@@ -6,7 +6,7 @@
 
 // Product tags (set on the Shopify products).
 export const CORE_TAG = "core";
-export const FEE_TAG = "customization-fee";
+export const FEE_TAG = "customize_charge";
 
 // Store rule, enforced at checkout by the B'sure app; the audit re-checks it.
 export const MIN_CORE_ITEMS = 25;
@@ -30,7 +30,7 @@ export interface FeeKindConfig {
 }
 
 export const FEE_KINDS: Record<FeeKind, FeeKindConfig> = {
-  patch: { label: "Patch logo", unit: "logo", rate: 4.0, titlePattern: /patch/i },
+  patch: { label: "Patch logo", unit: "logo", rate: 4.0, titlePattern: /^patch\b/i },
   heat: { label: "Heat Transfer logo", unit: "logo", rate: 2.9, titlePattern: /heat/i },
   number: { label: "Numbers", unit: "digit", rate: 2.0, titlePattern: /number/i },
   name: { label: "Names", unit: "name", rate: 2.0, titlePattern: /name/i },

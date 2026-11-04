@@ -63,10 +63,10 @@ export const OTHER = 3001; // no recognised tag
 export const tags: TagsByProductId = new Map([
   [JERSEY, ["core", "Kids"]],
   [BALL, ["core"]],
-  [HEAT, ["customization-fee"]],
-  [PATCH, ["customization-fee"]],
-  [NUMBER, ["customization-fee"]],
-  [NAME, ["customization-fee"]],
+  [HEAT, ["customize_charge"]],
+  [PATCH, ["customize_charge"]],
+  [NUMBER, ["customize_charge"]],
+  [NAME, ["customize_charge"]],
   [OTHER, ["gift"]],
 ]);
 
@@ -152,7 +152,7 @@ export const orderUnder25: OrderPayload = {
       price: "21.50",
       properties: customProps(roster(1, 12, "S"), { app: "Patch", logoPlacement: "", numberPlacement: "", fields: "number" }).filter((p) => p.name !== "Print Color"),
     }),
-    line({ title: "Patch Logo Product", product_id: PATCH, quantity: 12, price: "4.00" }),
+    line({ title: "Patch Product", product_id: PATCH, quantity: 12, price: "4.00" }),
     line({ title: "Number Customization", product_id: NUMBER, quantity: 15, price: "2.00" }),
     line({ title: "Name Customization", product_id: NAME, quantity: 12, price: "2.00" }),
   ],
