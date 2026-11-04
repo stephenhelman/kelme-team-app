@@ -56,6 +56,7 @@ import {
   type ImagePlanEntry,
 } from "@/lib/shopify-draft-plan";
 import { ONE_SIZE } from "@/lib/sku";
+import { CORE_REQUIRES_SHIPPING, CORE_WEIGHT_LB } from "@/lib/shipping-config";
 import type { AddedProduct } from "@/lib/product-added-notify";
 
 const CALL_PACING_MS = 400;
@@ -377,7 +378,7 @@ const VARIANTS_QUERY = `
           sku
           price
           selectedOptions { name value }
-          inventoryItem { id tracked }
+          inventoryItem { id tracked requiresShipping measurement { weight { value unit } } }
           media(first: 2) { nodes { id } }
         }
       }
@@ -390,7 +391,7 @@ interface VariantNode {
   sku: string | null;
   price: string;
   selectedOptions: { name: string; value: string }[];
-  inventoryItem: { id: string; tracked: boolean } | null;
+  inventoryItem: { id: string; tracked: boolean; requiresShipping: boolean; measurement: { weight: { value: number; unit: string } | null } } | null;
   media: { nodes: { id: string }[] };
 }
 
@@ -399,6 +400,14 @@ async function fetchVariants(productGid: string): Promise<VariantNode[]> {
   if (res.errors?.length) throw new Error(`variants query error: ${JSON.stringify(res.errors)}`);
   if (!res.data?.product) throw new Error(`product ${productGid} not found`);
   return res.data.product.variants.nodes;
+}
+
+const LB_PER_UNIT: Record<string, number> = { POUNDS: 1, OUNCES: 1 / 16, KILOGRAMS: 2.2046226218, GRAMS: 0.0022046226218 };
+
+/** Weight normalised to pounds (rounded to 4dp); null when unset or an unknown unit. */
+export function weightInLb(w: { value: number; unit: string } | null): number | null {
+  if (!w || !(w.unit in LB_PER_UNIT)) return null;
+  return Math.round(w.value * LB_PER_UNIT[w.unit] * 10000) / 10000;
 }
 
 // (colorCode, size) identity — never SKU alone, same rule as lib/shopify-relink.ts.
@@ -479,7 +488,7 @@ export interface VerifyReport {
   imagesAttached: number;
   expectedImages: number;
   variantsWithMedia: number;
-  perVariant: { sku: string; price: string; tracked: boolean; onHand: number | null; expectedQty: number; hasMedia: boolean }[];
+  perVariant: { sku: string; price: string; tracked: boolean; onHand: number | null; expectedQty: number; hasMedia: boolean; weightLb: number | null; requiresShipping: boolean | null }[];
   problems: string[];
 }
 
@@ -524,6 +533,8 @@ export async function verifyDraft(productGid: string, plan: DraftPlan): Promise<
       onHand: st?.currentOnHand ?? null,
       expectedQty: qtyByKey.get(variantKey(v)) ?? -1,
       hasMedia: v.media.nodes.length > 0,
+      weightLb: weightInLb(v.inventoryItem?.measurement.weight ?? null),
+      requiresShipping: v.inventoryItem?.requiresShipping ?? null,
     };
   });
 
@@ -543,6 +554,8 @@ export async function verifyDraft(productGid: string, plan: DraftPlan): Promise<
     if (v.onHand === null) problems.push(`${v.sku}: no inventory level at ${INVENTORY_LOCATION_ID}`);
     else if (v.onHand !== v.expectedQty) problems.push(`${v.sku}: on_hand ${v.onHand} != Kelme qty ${v.expectedQty}`);
     if (v.price !== plan.price) problems.push(`${v.sku}: price ${v.price} != ${plan.price}`);
+    if (v.weightLb !== CORE_WEIGHT_LB) problems.push(`${v.sku}: weight ${v.weightLb ?? "none"} lb != ${CORE_WEIGHT_LB} lb`);
+    if (v.requiresShipping !== CORE_REQUIRES_SHIPPING) problems.push(`${v.sku}: requiresShipping ${v.requiresShipping} != ${CORE_REQUIRES_SHIPPING}`);
     if (!v.hasMedia && plan.images.length > 0) problems.push(`${v.sku}: no image attached`);
   }
 

@@ -72,7 +72,7 @@ function printVerify(v: VerifyReport): void {
   console.log(`options        ${v.options.map((o) => `${o.name}[linked:${o.linkedKey ?? "NO"}, ${o.values} values]`).join("  ")}`);
   console.log(`variants       ${v.variantCount} (expected ${v.expectedVariantCount})`);
   console.log(`images         ${v.imagesAttached} on product (expected ${v.expectedImages}); ${v.variantsWithMedia}/${v.variantCount} variants have media`);
-  for (const p of v.perVariant) console.log(`   ${p.sku.padEnd(26)} price ${p.price} tracked ${p.tracked} on_hand ${p.onHand} (Kelme ${p.expectedQty}) media ${p.hasMedia}`);
+  for (const p of v.perVariant) console.log(`   ${p.sku.padEnd(26)} price ${p.price} tracked ${p.tracked} on_hand ${p.onHand} (Kelme ${p.expectedQty}) media ${p.hasMedia} weight ${p.weightLb}lb ships ${p.requiresShipping}`);
   console.log(v.problems.length === 0 ? "VERIFY OK — no problems" : `VERIFY PROBLEMS (${v.problems.length}):\n  - ${v.problems.join("\n  - ")}`);
 }
 

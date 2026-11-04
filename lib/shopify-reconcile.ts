@@ -20,6 +20,7 @@ import { pickSubProduct, titleHasStyleCode } from "@/lib/style-match";
 import { baseGroup, type BaseGroup } from "@/lib/shopify-split";
 import { shopifyAdminFetch, shopifyGraphQL, parseNextPageUrl } from "@/lib/shopify";
 import { buildSku } from "@/lib/sku";
+import { CORE_REQUIRES_SHIPPING, CORE_WEIGHT_LB } from "@/lib/shipping-config";
 
 const CALL_PACING_MS = 400;
 const BATCH_LOG_PATH = path.join(process.cwd(), "shopify-reconcile-log.jsonl");
@@ -616,6 +617,9 @@ export function buildMutationInput(
   // Draft creation only: a per-variant placeholder price. Existing reconcile
   // callers omit it, so their productSet payloads are unchanged.
   priceFor?: (t: TargetVariant) => string,
+  // Only the weight canary (scripts/shipping-canary-weight.ts) turns this off,
+  // to test whether a productSet that omits weight preserves it.
+  includeWeight = true,
 ) {
   const productOptions = [{ name: "Color", position: 1, values: colorValues.map((v) => ({ name: v.name })) }];
   if (sizeOptionName !== null) {
@@ -627,6 +631,11 @@ export function buildMutationInput(
     variants: target.map((t) => ({
       sku: buildSku(t.styleCode, t.colorCode, t.size),
       ...(priceFor ? { price: priceFor(t) } : {}),
+      // Every core variant is 1 lb and ships: per-unit shipping is a weight tier
+      // on cart weight (lib/shipping-config.ts), so this must never drift.
+      ...(includeWeight
+        ? { inventoryItem: { requiresShipping: CORE_REQUIRES_SHIPPING, measurement: { weight: { value: CORE_WEIGHT_LB, unit: "POUNDS" } } } }
+        : {}),
       optionValues:
         sizeOptionName === null
           ? [{ optionName: "Color", name: colorOptionValue(t.colorName, t.colorCode), linkedMetafieldValue: t.colorGid }]
