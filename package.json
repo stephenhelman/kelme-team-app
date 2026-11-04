@@ -17,7 +17,10 @@
     "push:product": "tsx --env-file=.env scripts/push-product.ts",
     "test": "tsx --test tests/*.test.ts",
     "webhook:register": "tsx --env-file=.env scripts/register-orders-webhook.ts",
-    "drafts": "tsx --env-file=.env scripts/drafts.ts"
+    "drafts": "tsx --env-file=.env scripts/drafts.ts",
+    "shipping:weights": "tsx --env-file=.env scripts/shipping-weights.ts",
+    "shipping:canary-weight": "tsx --env-file=.env scripts/shipping-canary-weight.ts",
+    "shipping:rates": "tsx --env-file=.env scripts/shipping-rates.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
