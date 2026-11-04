@@ -29,38 +29,8 @@ export const FALLBACK_RATE_NAME = "Request a quote";
 /** Max zones per deliveryProfileUpdate request. */
 export const ZONES_PER_REQUEST = 5;
 
-export interface WeightTier {
-  /** Inclusive lower bound, lb. */
-  minLb: number;
-  /** Inclusive upper bound, lb. */
-  maxLb: number;
-  /** Largest unit count this tier covers; the price is units * per-unit rate. */
-  units: number;
-}
-
-/**
- * Exact tier for n units: >= n-0.5 and <= n+0.4 lb (so n lb always lands in
- * it and the 0.1 lb gap to n+1's lower bound can't be hit by a whole-lb cart).
- */
-export function exactTier(n: number): WeightTier {
-  return { minLb: n - 0.5, maxLb: n + 0.4, units: n };
-}
-
-/** Stepped tier ending at `top` units, covering (top-STEP_UNITS, top], priced at `top`. */
-export function stepTier(top: number): WeightTier {
-  return { minLb: top - STEP_UNITS + 0.5, maxLb: top + 0.4, units: top };
-}
-
-/** Full tier ladder: exact 1..exactUpTo, then steps of 5 to maxUnits (priced at upper edge). */
-export function buildTiers(exactUpTo = EXACT_UP_TO, maxUnits = MAX_UNITS): WeightTier[] {
-  const tiers: WeightTier[] = [];
-  for (let n = 1; n <= exactUpTo; n++) tiers.push(exactTier(n));
-  let top = exactUpTo;
-  while (top < maxUnits) {
-    top = Math.min(top + STEP_UNITS, maxUnits);
-    tiers.push(stepTier(top));
-  }
-  return tiers;
-}
-
-export const money2 = (n: number): string => (Math.round(n * 100) / 100).toFixed(2);
+/** Requests carry at most this many created rates, so a 5-zone batch can't become one enormous payload. */
+export const MAX_METHODS_PER_REQUEST = 400;
+/** Rates the canary adds per request while ramping up (units; x2 services). */
+export const CANARY_RAMP_UNITS = 5;
+export const CANARY_PREFIX = "CANARY ";
