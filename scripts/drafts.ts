@@ -12,13 +12,24 @@
  *       re-captures X from Kelme, creates ONE DRAFT product and verifies it.
  *       --resume continues a partially-built draft (same title, status DRAFT).
  *
+ *       Add --notify to email the client a "products added" summary after a
+ *       successful create (to KELME_VENDOR_EMAIL, cc ADMIN_NOTIFY_EMAIL), or
+ *       --notify-to you@example.com to send only to that address. No email is
+ *       sent unless one of those is passed.
+ *
+ *   npm run drafts -- email-preview --styleCode A,B
+ *       Renders the "products added" email for already-created drafts to
+ *       draft-email-preview.html. Sends nothing.
+ *
  *   npm run drafts -- verify --styleCode X
  *       Read-only: re-reads X's draft from Shopify and reports the checks.
  */
 import { prisma } from "@/lib/prisma";
 import { runPreflight, writeReport, REPORT_MD } from "@/lib/draft-preflight";
 import { executeDraft, planDraft, previewMutations, verifyDraft, type DraftPlan, type VerifyReport } from "@/lib/shopify-draft";
-import { SHOPIFY_API_VERSION } from "@/lib/shopify";
+import { SHOPIFY_API_VERSION, shopDomain } from "@/lib/shopify";
+import { notifyProductsAdded, renderProductsAddedEmail } from "@/lib/product-added-notify";
+import { writeFile } from "fs/promises";
 
 function printPlan(plan: DraftPlan): void {
   console.log(`styleCode      ${plan.styleCode} (pdtid ${plan.pdtid})`);
@@ -70,7 +81,7 @@ async function main(): Promise<void> {
     return;
   }
   const styleCode = opt("styleCode");
-  if ((cmd === "create" || cmd === "verify") && !styleCode) {
+  if ((cmd === "create" || cmd === "verify" || cmd === "email-preview") && !styleCode) {
     console.error(`Usage: npm run drafts -- ${cmd} --styleCode X${cmd === "create" ? " [--execute] [--resume]" : ""}`);
     process.exit(1);
   }
@@ -93,6 +104,34 @@ async function main(): Promise<void> {
     console.log(`\n${result.createdNew ? "CREATED" : "RESUMED"} ${result.productId}; media uploaded this run: ${result.mediaUploaded}\n`);
     printVerify(result.verify);
     if (result.verify.problems.length > 0) process.exitCode = 1;
+    const notifyTo = opt("notify-to");
+    if (flag("notify") || notifyTo) {
+      if (result.verify.problems.length > 0) {
+        console.log("Not emailing: verification found problems.");
+      } else {
+        const sent = await notifyProductsAdded([result.summary], { adminBaseUrl: `https://${shopDomain()}/admin`, to: notifyTo, cc: notifyTo ? null : undefined });
+        console.log(`Emailed "products added" summary to ${sent.to} (resend id ${sent.id ?? "n/a"})`);
+      }
+    }
+    return;
+  }
+  if (cmd === "email-preview") {
+    const codes = styleCode!.split(",").map((c) => c.trim());
+    const added = [];
+    for (const code of codes) {
+      const plan = await planDraft(code);
+      if (plan.existingOnShopify.length !== 1) throw new Error(`Expected exactly 1 Shopify product for ${code}, found ${plan.existingOnShopify.length}`);
+      const v = await verifyDraft(plan.existingOnShopify[0].id, plan);
+      added.push({
+        title: v.title, styleCode: code, shopifyProductId: v.productId, status: v.status, category: v.category,
+        variantCount: v.variantCount, colorCount: plan.colorValues.length, sizes: plan.sizeValues.map((s) => s.name),
+        imagesAttached: v.imagesAttached, totalQty: plan.variants.reduce((n, x) => n + x.qty, 0),
+        variantsInStock: plan.variants.filter((x) => x.qty > 0).length, price: plan.price, needsPricing: v.tags.includes("needs-pricing"),
+      });
+    }
+    const mail = renderProductsAddedEmail(added, `https://${shopDomain()}/admin`);
+    await writeFile("draft-email-preview.html", mail.html, "utf8");
+    console.log(`Subject: ${mail.subject}\n\n${mail.text}\n\nHTML written to draft-email-preview.html (nothing sent)`);
     return;
   }
   if (cmd === "verify") {

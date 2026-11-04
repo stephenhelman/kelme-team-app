@@ -56,6 +56,7 @@ import {
   type ImagePlanEntry,
 } from "@/lib/shopify-draft-plan";
 import { ONE_SIZE } from "@/lib/sku";
+import type { AddedProduct } from "@/lib/product-added-notify";
 
 const CALL_PACING_MS = 400;
 const LOG_PATH = path.join(process.cwd(), "shopify-drafts-log.jsonl");
@@ -566,6 +567,7 @@ export interface ExecuteDraftResult {
   createdNew: boolean;
   mediaUploaded: number;
   verify: VerifyReport;
+  summary: AddedProduct;
 }
 
 export async function executeDraft(styleCode: string, opts: { resume?: boolean } = {}): Promise<ExecuteDraftResult> {
@@ -653,5 +655,20 @@ export async function executeDraft(styleCode: string, opts: { resume?: boolean }
   // 7. Re-read everything from Shopify.
   const verify = await verifyDraft(productGid, plan);
   await log({ styleCode, step: "verify", productGid, problems: verify.problems });
-  return { productId: productGid, createdNew, mediaUploaded, verify };
+  const summary: AddedProduct = {
+    title: plan.title,
+    styleCode: plan.styleCode,
+    shopifyProductId: productGid,
+    status: verify.status,
+    category: verify.category,
+    variantCount: verify.variantCount,
+    colorCount: plan.colorValues.length,
+    sizes: plan.sizeValues.map((v) => v.name),
+    imagesAttached: verify.imagesAttached,
+    totalQty: plan.variants.reduce((n, v) => n + v.qty, 0),
+    variantsInStock: plan.variants.filter((v) => v.qty > 0).length,
+    price: plan.price,
+    needsPricing: plan.tags.includes("needs-pricing"),
+  };
+  return { productId: productGid, createdNew, mediaUploaded, verify, summary };
 }
