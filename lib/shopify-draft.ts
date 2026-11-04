@@ -66,7 +66,9 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function log(entry: Record<string, unknown>): Promise<void> {
+export const DRAFT_LOG_PATH = LOG_PATH;
+
+export async function logDraftEvent(entry: Record<string, unknown>): Promise<void> {
   await appendFile(LOG_PATH, JSON.stringify({ ...entry, at: new Date().toISOString() }) + "\n", "utf8");
 }
 
@@ -584,7 +586,7 @@ export async function executeDraft(styleCode: string, opts: { resume?: boolean }
   if (!row) throw new Error(`No DB product found for styleCode "${styleCode}"`);
   const recap = await recaptureProduct({ id: row.id, pdtid: row.pdtid, styleCode });
   if (recap.error) throw new Error(`Kelme re-capture failed: ${recap.error}`);
-  if (recap.dropNotes.length > 0) throw new Error(`Kelme re-capture dropped sizes — not a clean product: ${recap.dropNotes.join("; ")}`);
+  if (recap.dropNotes.length > 0) throw new Error(`Cannot execute — Kelme re-capture dropped sizes, not a clean product: ${recap.dropNotes.join("; ")}`);
 
   const plan = await planDraft(styleCode);
   if (plan.blockers.length > 0) throw new Error(`Cannot execute — ${plan.blockers.join("; ")}`);
@@ -602,7 +604,7 @@ export async function executeDraft(styleCode: string, opts: { resume?: boolean }
       throw new Error(`Cannot resume — expected exactly one DRAFT titled "${plan.title}", found: ${JSON.stringify(plan.existingOnShopify)}`);
     }
     productGid = only.id;
-    await log({ styleCode, step: "resume", productGid });
+    await logDraftEvent({ styleCode, step: "resume", productGid });
   } else {
     if (resume) throw new Error("Cannot resume — no existing draft found for this style code");
     const res = await shopifyGraphQL<{ productCreate: { product: { id: string } | null; userErrors: UserErrors } }>(
@@ -612,14 +614,14 @@ export async function executeDraft(styleCode: string, opts: { resume?: boolean }
     assertOk("productCreate", res.errors, res.data?.productCreate.userErrors, res.data?.productCreate.product);
     productGid = res.data!.productCreate.product!.id;
     createdNew = true;
-    await log({ styleCode, step: "productCreate", productGid });
+    await logDraftEvent({ styleCode, step: "productCreate", productGid });
     await sleep(CALL_PACING_MS);
   }
   const productNumericId = numericId(productGid);
 
   // 3. Options + variants through the existing GID-linked path.
   await setShopifyProductStructure(productNumericId, plan.colorValues, plan.sizeValues, plan.target, plan.sizeOptionName, () => plan.price);
-  await log({ styleCode, step: "structure", productGid, variants: plan.target.length });
+  await logDraftEvent({ styleCode, step: "structure", productGid, variants: plan.target.length });
   await sleep(CALL_PACING_MS);
   if (plan.sizeOptionName !== null) {
     await executeSizeOrder(productNumericId);
@@ -630,7 +632,7 @@ export async function executeDraft(styleCode: string, opts: { resume?: boolean }
   const mediaUploaded = await ensureProductMedia(productGid, plan);
   await waitForMediaReady(productGid, plan.images.length);
   await executeMedia(productNumericId);
-  await log({ styleCode, step: "media", productGid, uploaded: mediaUploaded });
+  await logDraftEvent({ styleCode, step: "media", productGid, uploaded: mediaUploaded });
 
   // 5. Link-back: stamp variant + inventory-item ids in the DB.
   const live = await fetchVariants(productGid);
@@ -646,15 +648,15 @@ export async function executeDraft(styleCode: string, opts: { resume?: boolean }
     items.push({ inventoryItemGid: lv.inventoryItem.id, qty: v.qty });
   }
   await prisma.product.update({ where: { id: plan.productDbId }, data: { onShopify: true } });
-  await log({ styleCode, step: "linkback", productGid, variants: items.length });
+  await logDraftEvent({ styleCode, step: "linkback", productGid, variants: items.length });
 
   // 6. Inventory level at the store location with the Kelme qty.
   await ensureInventory(items);
-  await log({ styleCode, step: "inventory", productGid, items: items.length });
+  await logDraftEvent({ styleCode, step: "inventory", productGid, items: items.length });
 
   // 7. Re-read everything from Shopify.
   const verify = await verifyDraft(productGid, plan);
-  await log({ styleCode, step: "verify", productGid, problems: verify.problems });
+  await logDraftEvent({ styleCode, step: "verify", productGid, problems: verify.problems });
   const summary: AddedProduct = {
     title: plan.title,
     styleCode: plan.styleCode,

@@ -6,7 +6,7 @@
  * DB-backed token load/persist path the worker uses, so a token Kelme rolls
  * forward mid-run is saved for the worker's session too.
  */
-import { writeFile } from "fs/promises";
+import { readFile, writeFile } from "fs/promises";
 import path from "path";
 import { prisma } from "@/lib/prisma";
 import { shopifyGraphQL } from "@/lib/shopify";
@@ -107,7 +107,7 @@ export interface PreflightRun {
   results: PreflightResult[];
 }
 
-export async function runPreflight(opts: { capture: boolean; only?: string[] }): Promise<PreflightRun> {
+export async function runPreflight(opts: { capture: boolean; only?: string[]; knownDropNotes?: Map<string, string[]> }): Promise<PreflightRun> {
   const [relink, titles, allProducts] = await Promise.all([
     dryRunRelink(),
     fetchShopifyTitles(),
@@ -132,7 +132,10 @@ export async function runPreflight(opts: { capture: boolean; only?: string[] }):
     stoppedEarly: null,
     results: [],
   };
-  const dropNotes = new Map<string, string[]>();
+  // Dropped sizes are only observable during a capture; without one, reuse the
+  // notes recorded by the last --capture run rather than silently treating
+  // every product as having none.
+  const dropNotes = new Map<string, string[]>(opts.knownDropNotes ?? []);
 
   if (opts.capture) {
     for (let i = 0; i < candidates.length; i++) {
@@ -193,6 +196,19 @@ export async function runPreflight(opts: { capture: boolean; only?: string[] }):
   }
 
   return run;
+}
+
+// Dropped-size notes recorded by the last `preflight --capture` run.
+export async function loadRecordedDropNotes(): Promise<{ notes: Map<string, string[]>; generatedAt: string }> {
+  let raw: string;
+  try {
+    raw = await readFile(REPORT_JSON, "utf8");
+  } catch {
+    throw new Error("draft-preflight.json not found — run `npm run drafts -- preflight --capture` first");
+  }
+  const run = JSON.parse(raw) as PreflightRun;
+  if (!run.captured) throw new Error("draft-preflight.json was not produced by a --capture run — re-run `preflight --capture`");
+  return { notes: new Map(run.results.map((r) => [r.styleCode, r.droppedSizeNotes])), generatedAt: run.generatedAt };
 }
 
 export function renderReport(run: PreflightRun): string {

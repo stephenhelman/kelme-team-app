@@ -12,14 +12,27 @@
  *       re-captures X from Kelme, creates ONE DRAFT product and verifies it.
  *       --resume continues a partially-built draft (same title, status DRAFT).
  *
- *       Add --notify to email the client a "products added" summary after a
- *       successful create (to KELME_VENDOR_EMAIL, cc ADMIN_NOTIFY_EMAIL), or
- *       --notify-to you@example.com to send only to that address. No email is
- *       sent unless one of those is passed.
+ *       --notify-to you@example.com emails the summary to THAT address only
+ *       (a test send). The client is never emailed by create/batch — use the
+ *       separate `notify` command below once the run has succeeded.
  *
- *   npm run drafts -- email-preview --styleCode A,B
- *       Renders the "products added" email for already-created drafts to
- *       draft-email-preview.html. Sends nothing.
+ *   npm run drafts -- batch (--styleCode A,B | --all-clean) [--include-no-size]
+ *                          [--execute] [--continue-on-error] [--notify-to x]
+ *       Dry-run lists what would be created and what is skipped. --execute
+ *       creates the drafts one at a time (stops on the first failure unless
+ *       --continue-on-error); --notify-to sends ONE test summary to that
+ *       address only. --all-clean selects
+ *       pre-flight-clean apparel only; --include-no-size adds clean One-Size
+ *       products (socks) as a separate deliberate run. Flagged products and
+ *       products needing a >100-variant split are never selected.
+ *
+ *   npm run drafts -- notify (--styleCode A,B | --unnotified) [--send] [--force]
+ *       Run AFTER a successful --execute. Dry-run by default: shows the exact
+ *       email (recipients, subject, body; HTML to draft-email-preview.html)
+ *       for drafts whose execute run verified clean, built from live Shopify
+ *       state. --send emails the client (KELME_VENDOR_EMAIL, cc
+ *       ADMIN_NOTIFY_EMAIL) and records it so they are never emailed twice
+ *       about the same product (--force overrides).
  *
  *   npm run drafts -- verify --styleCode X
  *       Read-only: re-reads X's draft from Shopify and reports the checks.
@@ -28,8 +41,10 @@ import { prisma } from "@/lib/prisma";
 import { runPreflight, writeReport, REPORT_MD } from "@/lib/draft-preflight";
 import { executeDraft, planDraft, previewMutations, verifyDraft, type DraftPlan, type VerifyReport } from "@/lib/shopify-draft";
 import { SHOPIFY_API_VERSION, shopDomain } from "@/lib/shopify";
+import { buildNotifySelection, recordNotified } from "@/lib/draft-notify";
 import { notifyProductsAdded, renderProductsAddedEmail } from "@/lib/product-added-notify";
 import { writeFile } from "fs/promises";
+import { dryRunDraftBatch, executeDraftBatch, selectAllClean } from "@/lib/shopify-draft-batch";
 
 function printPlan(plan: DraftPlan): void {
   console.log(`styleCode      ${plan.styleCode} (pdtid ${plan.pdtid})`);
@@ -71,6 +86,7 @@ function opt(name: string): string | undefined {
 
 async function main(): Promise<void> {
   const cmd = process.argv[2];
+  const styleCodeArg = opt("styleCode");
   if (cmd === "preflight") {
     const only = opt("styleCode")?.split(",").map((s) => s.trim()).filter(Boolean);
     const run = await runPreflight({ capture: flag("capture"), only });
@@ -81,7 +97,44 @@ async function main(): Promise<void> {
     return;
   }
   const styleCode = opt("styleCode");
-  if ((cmd === "create" || cmd === "verify" || cmd === "email-preview") && !styleCode) {
+  if (cmd === "batch") {
+    const execute = flag("execute");
+    console.log(`Admin API ${SHOPIFY_API_VERSION} — batch ${execute ? "EXECUTE" : "dry-run"}`);
+    let codes: string[];
+    if (flag("all-clean")) {
+      const sel = await selectAllClean({ includeNoSize: flag("include-no-size") });
+      codes = sel.selected;
+      console.log(`--all-clean selected ${codes.length}; skipped ${sel.skipped.length} (see draft pre-flight report for flag detail)`);
+    } else if (styleCodeArg) {
+      codes = styleCodeArg.split(",").map((c) => c.trim()).filter(Boolean);
+    } else {
+      console.error("Usage: npm run drafts -- batch (--styleCode A,B | --all-clean) [--include-no-size] [--execute] [--continue-on-error] [--notify-to x]");
+      process.exit(1);
+    }
+    const plans = await dryRunDraftBatch(codes);
+    for (const p of plans) {
+      console.log(`${p.blockers.length > 0 ? "BLOCKED" : "ok     "} ${p.styleCode.padEnd(14)} ${String(p.variants).padStart(3)} variants ${p.images} images qty ${String(p.qty).padStart(3)}  ${p.title}${p.blockers.length > 0 ? `\n         ${p.blockers.join("; ")}` : ""}`);
+    }
+    const ready = plans.filter((p) => p.blockers.length === 0);
+    console.log(`\n${ready.length} ready, ${plans.length - ready.length} blocked; ${ready.reduce((n, p) => n + p.variants, 0)} variants total.`);
+    if (!execute) {
+      console.log("Dry-run only. Nothing was sent to Shopify. Re-run with --execute to create these drafts.");
+      return;
+    }
+    const result = await executeDraftBatch(ready.map((p) => p.styleCode), { continueOnError: flag("continue-on-error") });
+    console.log("\n===== batch summary =====");
+    for (const o of result.outcomes) console.log(`${o.status.padEnd(8)} ${o.styleCode}${o.message ? ` — ${o.message}` : ""}`);
+    if (result.stoppedEarly) console.log(`STOPPED EARLY: ${result.stoppedEarly}`);
+    const created = result.outcomes.flatMap((o) => (o.summary ? [o.summary] : []));
+    const notifyTo = opt("notify-to");
+    if (created.length > 0 && notifyTo) {
+      const sent = await notifyProductsAdded(created, { adminBaseUrl: `https://${shopDomain()}/admin`, to: notifyTo, cc: null });
+      console.log(`Emailed one summary for ${created.length} product(s) to ${sent.to} (resend id ${sent.id ?? "n/a"}) — test send, client NOT emailed`);
+    }
+    if (result.stoppedEarly || result.outcomes.some((o) => o.status === "failed")) process.exitCode = 1;
+    return;
+  }
+  if ((cmd === "create" || cmd === "verify") && !styleCode) {
     console.error(`Usage: npm run drafts -- ${cmd} --styleCode X${cmd === "create" ? " [--execute] [--resume]" : ""}`);
     process.exit(1);
   }
@@ -105,33 +158,44 @@ async function main(): Promise<void> {
     printVerify(result.verify);
     if (result.verify.problems.length > 0) process.exitCode = 1;
     const notifyTo = opt("notify-to");
-    if (flag("notify") || notifyTo) {
+    if (notifyTo) {
       if (result.verify.problems.length > 0) {
         console.log("Not emailing: verification found problems.");
       } else {
-        const sent = await notifyProductsAdded([result.summary], { adminBaseUrl: `https://${shopDomain()}/admin`, to: notifyTo, cc: notifyTo ? null : undefined });
-        console.log(`Emailed "products added" summary to ${sent.to} (resend id ${sent.id ?? "n/a"})`);
+        const sent = await notifyProductsAdded([result.summary], { adminBaseUrl: `https://${shopDomain()}/admin`, to: notifyTo, cc: null });
+        console.log(`Emailed "products added" summary to ${sent.to} (resend id ${sent.id ?? "n/a"}) — test send, client NOT emailed`);
       }
     }
     return;
   }
-  if (cmd === "email-preview") {
-    const codes = styleCode!.split(",").map((c) => c.trim());
-    const added = [];
-    for (const code of codes) {
-      const plan = await planDraft(code);
-      if (plan.existingOnShopify.length !== 1) throw new Error(`Expected exactly 1 Shopify product for ${code}, found ${plan.existingOnShopify.length}`);
-      const v = await verifyDraft(plan.existingOnShopify[0].id, plan);
-      added.push({
-        title: v.title, styleCode: code, shopifyProductId: v.productId, status: v.status, category: v.category,
-        variantCount: v.variantCount, colorCount: plan.colorValues.length, sizes: plan.sizeValues.map((s) => s.name),
-        imagesAttached: v.imagesAttached, totalQty: plan.variants.reduce((n, x) => n + x.qty, 0),
-        variantsInStock: plan.variants.filter((x) => x.qty > 0).length, price: plan.price, needsPricing: v.tags.includes("needs-pricing"),
-      });
+  if (cmd === "notify") {
+    if (!flag("unnotified") && !styleCodeArg) {
+      console.error("Usage: npm run drafts -- notify (--styleCode A,B | --unnotified) [--send] [--force]");
+      process.exit(1);
     }
-    const mail = renderProductsAddedEmail(added, `https://${shopDomain()}/admin`);
+    const sel = await buildNotifySelection({
+      styleCodes: styleCodeArg?.split(",").map((c) => c.trim()).filter(Boolean),
+      unnotified: flag("unnotified"),
+      force: flag("force"),
+    });
+    for (const k of sel.skipped) console.log(`skipped ${k.styleCode}: ${k.reason}`);
+    if (sel.products.length === 0) {
+      console.log("Nothing to send.");
+      return;
+    }
+    const base = `https://${shopDomain()}/admin`;
+    const mail = renderProductsAddedEmail(sel.products, base);
+    const to = process.env.KELME_VENDOR_EMAIL;
+    const cc = process.env.ADMIN_NOTIFY_EMAIL;
     await writeFile("draft-email-preview.html", mail.html, "utf8");
-    console.log(`Subject: ${mail.subject}\n\n${mail.text}\n\nHTML written to draft-email-preview.html (nothing sent)`);
+    console.log(`To: ${to ?? "(KELME_VENDOR_EMAIL NOT SET)"}${cc ? `   Cc: ${cc}` : ""}\nSubject: ${mail.subject}\n\n${mail.text}\n\nHTML preview: draft-email-preview.html`);
+    if (!flag("send")) {
+      console.log(`\nDry-run only — nothing sent. Re-run with --send to email the client about ${sel.products.length} product(s).`);
+      return;
+    }
+    const sent = await notifyProductsAdded(sel.products, { adminBaseUrl: base });
+    await recordNotified(sel.products, sent.to, sent.id);
+    console.log(`\nSENT to ${sent.to} (resend id ${sent.id ?? "n/a"}) for ${sel.products.length} product(s).`);
     return;
   }
   if (cmd === "verify") {
