@@ -654,10 +654,11 @@ export async function setShopifyProductStructure(
   target: TargetVariant[],
   sizeOptionName: string | null = "Size",
   priceFor?: (t: TargetVariant) => string,
+  includeWeight = true,
 ): Promise<number> {
   const resolved = await ensureOptionValuesExist(shopifyProductId, colorValues, sizeValues, sizeOptionName);
 
-  const input = buildMutationInput(shopifyProductId, colorValues, sizeValues, target, resolved.sizeOptionName, priceFor);
+  const input = buildMutationInput(shopifyProductId, colorValues, sizeValues, target, resolved.sizeOptionName, priceFor, includeWeight);
   const identifier = productSetIdentifier(shopifyProductId);
 
   console.log(

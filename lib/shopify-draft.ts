@@ -386,7 +386,7 @@ const VARIANTS_QUERY = `
   }
 `;
 
-interface VariantNode {
+export interface VariantNode {
   id: string;
   sku: string | null;
   price: string;
@@ -395,7 +395,7 @@ interface VariantNode {
   media: { nodes: { id: string }[] };
 }
 
-async function fetchVariants(productGid: string): Promise<VariantNode[]> {
+export async function fetchVariants(productGid: string): Promise<VariantNode[]> {
   const res = await shopifyGraphQL<{ product: { variants: { nodes: VariantNode[] } } | null }>(VARIANTS_QUERY, { id: productGid });
   if (res.errors?.length) throw new Error(`variants query error: ${JSON.stringify(res.errors)}`);
   if (!res.data?.product) throw new Error(`product ${productGid} not found`);
@@ -411,7 +411,7 @@ export function weightInLb(w: { value: number; unit: string } | null): number | 
 }
 
 // (colorCode, size) identity — never SKU alone, same rule as lib/shopify-relink.ts.
-function variantKey(v: VariantNode): string {
+export function variantKey(v: VariantNode): string {
   const color = v.selectedOptions.find((o) => o.name === "Color")?.value ?? null;
   const size = v.selectedOptions.find((o) => o.name === "Size" || o.name === "Ball size")?.value ?? ONE_SIZE;
   return `${parseColorCode(color) ?? "?"}::${size}`;
