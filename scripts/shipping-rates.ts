@@ -4,7 +4,8 @@
  * cart weight == core unit count. DRY-RUN by default; every write needs --execute.
  *
  *   npm run shipping:rates                       # dry-run of the full run (per-zone diff)
- *   npm run shipping:rates -- --execute          # backs up, replaces Standard/Express tiers, verifies
+ *   npm run shipping:rates -- --execute          # (add --fix-fallback if "Request a quote" has no weight floor)
+ *                                                # backs up, replaces Standard/Express tiers, verifies
  *   npm run shipping:rates -- --verify           # read-only: compare live profile to expected
  *   npm run shipping:rates -- --canary --zone <id> [--max-units 300] [--execute]
  *                                                # ramp exact tiers on ONE zone until Shopify rejects
@@ -28,6 +29,7 @@ import {
   checkCarts,
   diffLadder,
   exactTier,
+  r1,
   SERVICES,
   type Mismatch,
 } from "@/lib/shipping-tiers";
@@ -117,17 +119,29 @@ async function fullRun(execute: boolean) {
     const replace = z.methods.filter((m) => m.kind === "rate" && ours(m.name));
     const keep = z.methods.filter((m) => !replace.includes(m));
     const fb = keep.filter(isFallback);
+    const fbDelete: string[] = [];
+    const fbCreate: MethodCreate[] = [];
     for (const f of fb) {
       const floor = fallbackFloorLb(f);
-      if (floor === null || floor <= topMax) blockers.push(`zone ${z.name}: "${FALLBACK_RATE_NAME}" floor is ${floor ?? "none"} lb (must be > ${topMax} lb, else it shows alongside tiers). Fix it in Shopify, or pass --allow-fallback-overlap`);
+      if (floor !== null && floor > topMax) continue;
+      if (flag("fix-fallback")) {
+        // Same rate re-created with a weight floor just above the top tier (delete + create: atomic in this zone's request).
+        const m = methodFromLive(f, profile.currency);
+        m.weightConditionsToCreate = [{ operator: "GREATER_THAN_OR_EQUAL_TO", criteria: { value: r1(topMax + 0.1), unit: "POUNDS" } }];
+        fbDelete.push(f.id);
+        fbCreate.push(m);
+        console.log(`  zone ${z.name}: "${FALLBACK_RATE_NAME}" ($${f.price}, floor ${floor ?? "none"}) -> will be re-created with floor >= ${r1(topMax + 0.1)} lb`);
+      } else {
+        blockers.push(`zone ${z.name}: "${FALLBACK_RATE_NAME}" floor is ${floor ?? "none"} lb (must be > ${topMax} lb, else it shows alongside tiers). Pass --fix-fallback to re-create it with a ${r1(topMax + 0.1)} lb floor, or --allow-fallback-overlap`);
+      }
     }
     const others = keep.filter((m) => !isFallback(m));
     console.log(`  ${describeZone(z)}: delete ${replace.length} old Standard/Express, create ${tiers.length * SERVICES.length}, keep fallback x${fb.length}${others.length ? `, ${others.length} other rates untouched (${others.map((o) => o.name).join(", ")})` : ""}${fb.length === 0 ? "  [no fallback rate in this zone]" : ""}`);
     work.push({
       zoneId: z.id,
       zoneName: z.name,
-      deleteIds: replace.map((m) => m.id),
-      create: SERVICES.flatMap((s) => tiers.map((t) => tierMethod(s.name, s.perUnit, t, profile.currency))),
+      deleteIds: [...replace.map((m) => m.id), ...fbDelete],
+      create: [...SERVICES.flatMap((s) => tiers.map((t) => tierMethod(s.name, s.perUnit, t, profile.currency))), ...fbCreate],
     });
   }
   const overlapOnly = blockers.every((b) => b.includes("floor is"));
