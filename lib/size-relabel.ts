@@ -122,6 +122,7 @@ export interface SnapVariant {
   inventoryItemId: string | null;
   weightLb: number | null;
   requiresShipping: boolean | null;
+  price: string;
 }
 export interface Snapshot {
   productGid: string;
@@ -139,7 +140,7 @@ const SNAPSHOT_QUERY = `
       variants(first: 250, after: $cursor) {
         pageInfo { hasNextPage endCursor }
         nodes {
-          id sku inventoryQuantity
+          id sku price inventoryQuantity
           selectedOptions { name value }
           inventoryItem { id requiresShipping measurement { weight { value unit } } }
         }
@@ -159,6 +160,7 @@ interface SnapshotResponse {
       nodes: {
         id: string;
         sku: string | null;
+        price: string;
         inventoryQuantity: number | null;
         selectedOptions: { name: string; value: string }[];
         inventoryItem: { id: string; requiresShipping: boolean; measurement: { weight: { value: number; unit: string } | null } } | null;
@@ -182,6 +184,7 @@ export async function fetchSnapshot(productGid: string): Promise<Snapshot> {
         id: v.id,
         sku: v.sku ?? "",
         qty: v.inventoryQuantity ?? 0,
+        price: v.price,
         color: v.selectedOptions.find((o) => o.name === "Color")?.value ?? null,
         size: v.selectedOptions.find((o) => o.name === "Size")?.value ?? null,
         inventoryItemId: v.inventoryItem?.id ?? null,
@@ -499,7 +502,7 @@ export interface ExecuteStyleResult {
   perProduct: { productGid: string; title: string; verify: VerifyResult }[];
 }
 
-export async function executeStyle(plan: StylePlan): Promise<ExecuteStyleResult> {
+export async function executeStyle(plan: StylePlan, batchId?: string): Promise<ExecuteStyleResult> {
   const problems = planProblems(plan);
   if (problems.length > 0) throw new Error(`refusing to execute — plan has problems:\n  ${problems.join("\n  ")}`);
 
@@ -508,6 +511,7 @@ export async function executeStyle(plan: StylePlan): Promise<ExecuteStyleResult>
   await logEvent({
     kind: "relabel-start",
     styleCode: plan.styleCode,
+    batchId: batchId ?? null,
     products: plan.products.map((p) => ({
       productGid: p.snapshot.productGid,
       optionId: p.snapshot.sizeOption!.id,
@@ -615,4 +619,37 @@ export async function rollbackStyle(styleCode: string): Promise<VerifyResult> {
   checks.push({ name: "DB restored", ok: true, detail: `${rows.length} rows` });
   await logEvent({ kind: "rollback-done", styleCode, checks });
   return { ok: checks.every((c) => c.ok), checks };
+}
+
+// ---------------------------------------------------------------- batches
+
+/** Styles with kids-height variants on live Shopify products, in a stable order. */
+export async function kidsStyleCodes(): Promise<string[]> {
+  const rows = await prisma.product.findMany({
+    where: { onShopify: true, variants: { some: { kelmeSize: { endsWith: "cm" }, shopifyVariantId: { not: null } } } },
+    select: { styleCode: true },
+    orderBy: { styleCode: "asc" },
+  });
+  return rows.map((r) => r.styleCode);
+}
+
+/** A style still needs work when any value rename, SKU write or DB update is pending. */
+export function planIsPending(plan: StylePlan): boolean {
+  return plan.dbUpdates.length > 0 || plan.products.some((p) => p.ops.length > 0 || p.skuWrites.length > 0);
+}
+
+export async function styleBatchesOfLog(batchId: string): Promise<string[]> {
+  let raw = "";
+  try {
+    raw = await readFile(RELABEL_LOG_PATH, "utf8");
+  } catch {
+    return [];
+  }
+  const styles: string[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    const e = JSON.parse(line);
+    if (e.kind === "relabel-start" && e.batchId === batchId) styles.push(e.styleCode);
+  }
+  return styles;
 }

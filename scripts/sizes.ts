@@ -9,10 +9,20 @@
  *   npm run sizes -- relabel --styleCode X --execute
  *   npm run sizes -- rollback --styleCode X [--execute]   # rename back from the log
  *
+ *   npm run sizes -- add-sizes --styleCode X [--sizes XXS]      # step 4: add a newly sellable size to a LIVE product (read-only dry-run)
+ *   npm run sizes -- add-sizes --styleCode X --execute
+ *
+ *   npm run sizes -- relabel-batch --limit 10 [--exclude A,B]    # step 5: next N pending kids styles (dry-run)
+ *   npm run sizes -- relabel-batch --limit 10 --execute          # runs them one by one, verify each, stops on first failure
+ *   npm run sizes -- rollback-batch --batchId ID [--execute]     # rename back every style in that batch
+ *
  * Stop the Railway worker before any --execute (see the cutover runbook).
  */
 import {
   RELABEL_LOG_PATH,
+  kidsStyleCodes,
+  planIsPending,
+  styleBatchesOfLog,
   executeStyle,
   planProblems,
   planStyle,
@@ -22,6 +32,7 @@ import {
   type StylePlan,
   type VerifyResult,
 } from "@/lib/size-relabel";
+import { executeAdd, planAdd } from "@/lib/size-add";
 import { createVariables, executeSeed, planSeed } from "@/lib/size-seed";
 
 async function seed(execute: boolean) {
@@ -110,13 +121,105 @@ async function rollback(execute: boolean) {
   if (!res.ok) process.exitCode = 1;
 }
 
+async function addSizes(execute: boolean) {
+  const styleCode = arg("styleCode");
+  if (!styleCode) throw new Error("--styleCode is required");
+  const only = (arg("sizes") ?? "XXS").split(",");
+  const plan = await planAdd(styleCode, only);
+  console.log(`style ${styleCode} (pdtid ${plan.pdtid}) — sizes ${only.join(",")}`);
+  if (plan.shopify) console.log(`Shopify: ${plan.shopify.title} [${plan.shopify.status}] ${plan.shopify.productGid}, ${plan.shopify.variants} variants`);
+  console.log(`Price new variants will carry: ${plan.price ? plan.price.price : "(unresolved)"}${plan.price?.compareAtPrices.length ? ` (compare-at present: ${plan.price.compareAtPrices.join(",")} — NOT copied)` : ""}`);
+  console.log(`DB already has ${plan.alreadyInDb} of these; to add: ${plan.newVariants.length}`);
+  for (const n of plan.newVariants) console.log(`  + ${n.sku}  ${n.colorName}  qty ${n.qty}`);
+  for (const p of plan.problems) console.log(`PROBLEM: ${p}`);
+  if (plan.problems.length > 0) {
+    console.log("STOPPED.");
+    process.exitCode = 1;
+    return;
+  }
+  if (!execute) {
+    console.log("DRY RUN — nothing written (Kelme was only read). Re-run with --execute (worker stopped).");
+    return;
+  }
+  console.log("EXECUTING: capture -> guard -> reconcile/order/media/tags -> relink -> inventory push -> verify");
+  const res = await executeAdd(styleCode, only);
+  for (const c of res.checks) console.log(`  ${c.ok ? "PASS" : "FAIL"}  ${c.name}${c.detail ? ` — ${c.detail}` : ""}`);
+  console.log(res.ok ? "ALL CHECKS PASSED." : "CHECKS FAILED — see above.");
+  if (!res.ok) process.exitCode = 1;
+}
+
+async function relabelBatch(execute: boolean) {
+  const limit = Number(arg("limit") ?? "10");
+  const exclude = new Set((arg("exclude") ?? "").split(",").filter(Boolean));
+  const all = (await kidsStyleCodes()).filter((s) => !exclude.has(s));
+  console.log(`${all.length} kids styles on live products; scanning for pending work...`);
+  const batch: { styleCode: string; plan: StylePlan }[] = [];
+  let done = 0;
+  for (const styleCode of all) {
+    const plan = await planStyle(styleCode);
+    const problems = planProblems(plan);
+    if (problems.length > 0) {
+      console.log(`PROBLEM ${styleCode}:\n  ${problems.join("\n  ")}`);
+      process.exitCode = 1;
+      if (execute) return console.log("STOPPED — resolve the problem (or pass --exclude) before executing.");
+      continue;
+    }
+    if (!planIsPending(plan)) {
+      done++;
+      continue;
+    }
+    batch.push({ styleCode, plan });
+    if (batch.length >= limit) break;
+  }
+  console.log(`already done: ${done}; this batch: ${batch.length} style(s)`);
+  for (const b of batch) {
+    const ops = b.plan.products.reduce((n, p) => n + p.ops.length, 0);
+    const skus = b.plan.products.reduce((n, p) => n + p.skuWrites.length, 0);
+    console.log(`  ${b.styleCode}: ${b.plan.products.length} product(s), ${ops} value rename(s), ${skus} SKU(s), ${b.plan.dbUpdates.length} DB row(s)`);
+  }
+  if (!execute) return console.log("DRY RUN — nothing written. Re-run with --execute (worker stopped).");
+  const batchId = `kids-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  console.log(`\nBATCH ID ${batchId}  (rollback: npm run sizes -- rollback-batch --batchId ${batchId} --execute)`);
+  for (const b of batch) {
+    console.log(`\n== ${b.styleCode}`);
+    const res = await executeStyle(b.plan, batchId);
+    for (const p of res.perProduct) printChecks(p.verify);
+    if (!res.ok) {
+      console.log(`\nVERIFY FAILED on ${b.styleCode} — STOPPING. Roll back this batch: npm run sizes -- rollback-batch --batchId ${batchId} --execute`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+  console.log(`\nBATCH ${batchId} OK (${batch.length} styles). Run the same command again for the next batch.`);
+}
+
+async function rollbackBatch(execute: boolean) {
+  const batchId = arg("batchId");
+  if (!batchId) throw new Error("--batchId is required");
+  const styles = (await styleBatchesOfLog(batchId)).reverse();
+  console.log(`batch ${batchId}: ${styles.length} style(s), rolled back in reverse order: ${styles.join(", ")}`);
+  if (!execute) return console.log("DRY RUN — nothing written. Re-run with --execute.");
+  for (const styleCode of styles) {
+    console.log(`\n== rollback ${styleCode}`);
+    const res = await rollbackStyle(styleCode);
+    printChecks(res);
+    if (!res.ok) {
+      process.exitCode = 1;
+      return console.log("ROLLBACK CHECK FAILED — stopping.");
+    }
+  }
+}
+
 async function main() {
   const [cmd] = process.argv.slice(2);
   const execute = process.argv.includes("--execute");
   if (cmd === "seed") return seed(execute);
   if (cmd === "relabel") return relabel(execute);
   if (cmd === "rollback") return rollback(execute);
-  throw new Error(`unknown command "${cmd}" — expected: seed | relabel | rollback`);
+  if (cmd === "relabel-batch") return relabelBatch(execute);
+  if (cmd === "rollback-batch") return rollbackBatch(execute);
+  if (cmd === "add-sizes") return addSizes(execute);
+  throw new Error(`unknown command "${cmd}" — expected: seed | relabel | rollback | relabel-batch | rollback-batch | add-sizes`);
 }
 
 main().then(() => process.exit(process.exitCode ?? 0), (e) => { console.error(e); process.exit(1); });

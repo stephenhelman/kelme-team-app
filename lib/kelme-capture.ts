@@ -51,7 +51,7 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
 // cleanly separates the two (confirmed against every "ball"-matching name in
 // the live catalog).
 const NON_BALL_QUALIFIERS = /\b(set|shorts|shirt|socks|bag|net|board)\b/i;
-function isBallProduct(name: string): boolean {
+export function isBallProduct(name: string): boolean {
   return /ball/i.test(name) && !NON_BALL_QUALIFIERS.test(name);
 }
 
