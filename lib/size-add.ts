@@ -27,6 +27,8 @@ export interface AddPlan {
   sizeGidMissing: string[];
   shopify: { productGid: string; title: string; status: string; variants: number } | null;
   price: UniformPrice | null;
+  /** Variants the reconcile would add on Shopify right now (DB vs Shopify). */
+  shopifyPendingAdds: number;
   problems: string[];
 }
 
@@ -34,7 +36,7 @@ export interface AddPlan {
 export async function planAdd(styleCode: string, only: string[]): Promise<AddPlan> {
   const product = await prisma.product.findFirst({ where: { styleCode }, include: { variants: true } });
   if (!product) throw new Error(`no DB product ${styleCode}`);
-  const plan: AddPlan = { styleCode, pdtid: product.pdtid, newVariants: [], alreadyInDb: 0, sizeGidMissing: [], shopify: null, price: null, problems: [] };
+  const plan: AddPlan = { styleCode, pdtid: product.pdtid, newVariants: [], alreadyInDb: 0, sizeGidMissing: [], shopify: null, price: null, shopifyPendingAdds: 0, problems: [] };
 
   const allowed = new Set((await prisma.size.findMany({ select: { shopifySize: true } })).map((s) => s.shopifySize));
   const sheet = await fetchSkuSheet(product.pdtid);
@@ -64,6 +66,7 @@ export async function planAdd(styleCode: string, only: string[]): Promise<AddPla
     plan.problems.push(`no unambiguous Shopify match: ${dry.skipReason ?? "unknown"}`);
     return plan;
   }
+  plan.shopifyPendingAdds = dry.variantsToAdd.length;
   const productGid = `gid://shopify/Product/${dry.shopifyProductId}`;
   const snap = await fetchSnapshot(productGid);
   plan.shopify = { productGid, title: snap.title, status: snap.status, variants: snap.variants.length };

@@ -11,6 +11,7 @@
  *
  *   npm run sizes -- add-sizes --styleCode X [--sizes XXS]      # step 4: add a newly sellable size to a LIVE product (read-only dry-run)
  *   npm run sizes -- add-sizes --styleCode X --execute
+ *   npm run sizes -- add-sizes --styleCodes A,B,C [--execute]       # several styles, in order, stopping at the first problem
  *
  *   npm run sizes -- relabel-batch --limit 10 [--exclude A,B]    # step 5: next N pending kids styles (dry-run)
  *   npm run sizes -- relabel-batch --limit 10 --execute          # runs them one by one, verify each, stops on first failure
@@ -133,8 +134,22 @@ async function rollback(execute: boolean) {
 }
 
 async function addSizes(execute: boolean) {
+  const many = arg("styleCodes");
+  if (many) {
+    // Several styles in one go: each is planned and, with --execute, run and verified in turn; stops on the first problem or failed check.
+    for (const code of many.split(",").map((x) => x.trim()).filter(Boolean)) {
+      console.log(`\n===== ${code}`);
+      await addSizesOne(code, execute);
+      if (process.exitCode) return console.log(`\nSTOPPED at ${code} — fix it before continuing with the rest.`);
+    }
+    return;
+  }
   const styleCode = arg("styleCode");
-  if (!styleCode) throw new Error("--styleCode is required");
+  if (!styleCode) throw new Error("--styleCode or --styleCodes is required");
+  return addSizesOne(styleCode, execute);
+}
+
+async function addSizesOne(styleCode: string, execute: boolean) {
   const only = (arg("sizes") ?? "XXS").split(",");
   const plan = await planAdd(styleCode, only);
   console.log(`style ${styleCode} (pdtid ${plan.pdtid}) — sizes ${only.join(",")}`);
@@ -142,7 +157,12 @@ async function addSizes(execute: boolean) {
   console.log(`Price new variants will carry: ${plan.price ? plan.price.price : "(unresolved)"}${plan.price?.compareAtPrices.length ? ` (compare-at present: ${plan.price.compareAtPrices.join(",")} — NOT copied)` : ""}`);
   console.log(`DB already has ${plan.alreadyInDb} of these; to add: ${plan.newVariants.length}`);
   for (const n of plan.newVariants) console.log(`  + ${n.sku}  ${n.colorName}  qty ${n.qty}`);
+  console.log(`Shopify is missing ${plan.shopifyPendingAdds} variant(s) vs the DB right now.`);
   for (const p of plan.problems) console.log(`PROBLEM: ${p}`);
+  if (plan.problems.length === 0 && plan.newVariants.length === 0 && plan.shopifyPendingAdds === 0 && plan.alreadyInDb > 0) {
+    console.log("ALREADY DONE — XXS is in the DB and on Shopify; nothing to do for this style.");
+    return;
+  }
   if (plan.problems.length > 0) {
     console.log("STOPPED.");
     process.exitCode = 1;
