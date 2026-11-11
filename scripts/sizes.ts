@@ -16,6 +16,7 @@
  *   npm run sizes -- relabel-batch --limit 10 --execute          # runs them one by one, verify each, stops on first failure
  *   npm run sizes -- rollback-batch --batchId ID [--execute]     # rename back every style in that batch
  *
+ *   npm run sizes -- status [--batchId ID | --all]               # read-only: complete / shopify-only / shopify-partial / untouched / anomaly per style
  *   npm run sizes -- post-check                                   # step 5 end: read-only DB<->Shopify link + inventory dry-run summary
  *   npm run sizes -- drop-old-sizes [--execute]                   # remove Size rows no longer sold (14, 16, 2XS) once no variant uses them
  *
@@ -23,6 +24,8 @@
  */
 import {
   RELABEL_LOG_PATH,
+  classifyState,
+  logStyles,
   kidsStyleCodes,
   planIsPending,
   styleBatchesOfLog,
@@ -72,7 +75,8 @@ function printChecks(v: VerifyResult) {
 }
 
 function printPlan(plan: StylePlan) {
-  console.log(`style ${plan.styleCode}: ${plan.products.length} Shopify product(s)`);
+  const st = classifyState(plan);
+  console.log(`style ${plan.styleCode}: ${plan.products.length} Shopify product(s) — STATE ${st.state}: ${st.detail}`);
   for (const pp of plan.products) {
     const snap = pp.snapshot;
     console.log(`\n${snap.title}  [${snap.status}]  ${snap.productGid}`);
@@ -247,6 +251,23 @@ async function dropOldSizes(execute: boolean) {
   console.log(`dropped: ${safe.join(", ") || "(none)"}`);
 }
 
+async function status() {
+  const all = process.argv.includes("--all");
+  const batchId = arg("batchId");
+  const styles = all ? await kidsStyleCodes() : await logStyles(batchId);
+  console.log(`${styles.length} style(s) ${all ? "(all kids styles)" : batchId ? `in batch ${batchId}` : "in the relabel log"}\n`);
+  const counts: Record<string, string[]> = {};
+  for (const styleCode of styles) {
+    const plan = await planStyle(styleCode);
+    const st = classifyState(plan);
+    (counts[st.state] ??= []).push(styleCode);
+    const probs = plan.problems.concat(plan.products.flatMap((p) => p.problems));
+    console.log(`${styleCode.padEnd(14)} ${st.state.padEnd(16)} ${st.detail}${probs.length ? `  PROBLEMS: ${probs.join(" | ")}` : ""}`);
+  }
+  console.log("\nSUMMARY");
+  for (const [k, v] of Object.entries(counts)) console.log(`  ${k}: ${v.length}${k === "complete" ? "" : `  -> ${v.join(", ")}`}`);
+}
+
 async function main() {
   const [cmd] = process.argv.slice(2);
   const execute = process.argv.includes("--execute");
@@ -255,10 +276,11 @@ async function main() {
   if (cmd === "rollback") return rollback(execute);
   if (cmd === "relabel-batch") return relabelBatch(execute);
   if (cmd === "rollback-batch") return rollbackBatch(execute);
+  if (cmd === "status") return status();
   if (cmd === "post-check") return postCheck();
   if (cmd === "drop-old-sizes") return dropOldSizes(execute);
   if (cmd === "add-sizes") return addSizes(execute);
-  throw new Error(`unknown command "${cmd}" — expected: seed | relabel | rollback | relabel-batch | rollback-batch | add-sizes | post-check | drop-old-sizes`);
+  throw new Error(`unknown command "${cmd}" — expected: seed | relabel | rollback | relabel-batch | rollback-batch | add-sizes | status | post-check | drop-old-sizes`);
 }
 
 main().then(() => process.exit(process.exitCode ?? 0), (e) => { console.error(e); process.exit(1); });

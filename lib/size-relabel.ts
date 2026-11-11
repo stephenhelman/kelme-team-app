@@ -19,6 +19,7 @@
  */
 import { appendFile, readFile } from "fs/promises";
 import path from "path";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { shopifyGraphQL } from "@/lib/shopify";
 import { buildSku } from "@/lib/sku";
@@ -229,6 +230,8 @@ export interface ProductRelabelPlan {
 
 export interface StylePlan {
   styleCode: string;
+  /** DB kids-height rows for this style (linked or not) — used to tell "DB untouched" from "DB partly done". */
+  dbKidsRows: number;
   products: ProductRelabelPlan[];
   dbUpdates: { dbId: number; productId: number; fromSize: string; toSize: string; fromSku: string; toSku: string }[];
   problems: string[];
@@ -250,12 +253,12 @@ async function productGidsForVariants(variantGids: string[]): Promise<Map<string
 
 export async function planStyle(styleCode: string, opts: { onlyProduct?: string } = {}): Promise<StylePlan> {
   const dbProduct = await prisma.product.findFirst({ where: { styleCode }, select: { id: true, name: true } });
-  if (!dbProduct) return { styleCode, products: [], dbUpdates: [], problems: [`no DB product with styleCode ${styleCode}`] };
+  if (!dbProduct) return { styleCode, dbKidsRows: 0, products: [], dbUpdates: [], problems: [`no DB product with styleCode ${styleCode}`] };
   const dbVariants = await prisma.variant.findMany({
     where: { productId: dbProduct.id },
     select: { id: true, productId: true, colorCode: true, kelmeSize: true, shopifySize: true, sku: true, shopifyVariantId: true },
   });
-  const plan: StylePlan = { styleCode, products: [], dbUpdates: [], problems: [] };
+  const plan: StylePlan = { styleCode, dbKidsRows: dbVariants.filter((v) => v.kelmeSize.endsWith("cm")).length, products: [], dbUpdates: [], problems: [] };
 
   const linked = dbVariants.filter((v) => v.shopifyVariantId);
   const unlinked = dbVariants.filter((v) => !v.shopifyVariantId && v.kelmeSize.endsWith("cm"));
@@ -339,8 +342,44 @@ export async function planStyle(styleCode: string, opts: { onlyProduct?: string 
   return plan;
 }
 
+export type StyleState =
+  | "complete" // Shopify and DB both on the new labels
+  | "shopify-only" // Shopify done, DB still old -> resumable (DB update + verify only)
+  | "shopify-partial" // some Shopify work done (values or SKUs), DB old -> resumable
+  | "untouched" // nothing done anywhere
+  | "anomaly"; // DB new but Shopify old, or mixed -> never guessed, execution refuses
+
+export interface StyleStatus {
+  state: StyleState;
+  detail: string;
+}
+
+/** Pure: where is this style in the relabel? Based on the plan's pending work. */
+export function classifyState(plan: StylePlan): StyleStatus {
+  if (plan.products.length === 0) return { state: "anomaly", detail: "no Shopify products resolved for this style" };
+  const shopifyPending = plan.products.some((p) => p.ops.length > 0 || p.skuWrites.length > 0);
+  const shopifyUntouched = plan.products.every((p) => p.alreadyDone === 0 && p.ops.length > 0 && p.skuWrites.length === p.snapshot.variants.length);
+  const dbPending = plan.dbUpdates.length > 0;
+  const dbUntouched = plan.dbKidsRows > 0 && plan.dbUpdates.length === plan.dbKidsRows;
+  if (!shopifyPending && !dbPending) return { state: "complete", detail: "Shopify and DB are on the new labels" };
+  if (!shopifyPending && dbPending) return { state: "shopify-only", detail: `Shopify is done; ${plan.dbUpdates.length} DB row(s) still on old labels` };
+  if (shopifyUntouched && dbUntouched) return { state: "untouched", detail: "Shopify and DB are both on the old labels" };
+  if (!dbPending) return { state: "anomaly", detail: "DB is already on the new labels but Shopify still has old ones — not guessing; investigate" };
+  if (dbUntouched) {
+    const ops = plan.products.reduce((n, p) => n + p.ops.length, 0);
+    const skus = plan.products.reduce((n, p) => n + p.skuWrites.length, 0);
+    return { state: "shopify-partial", detail: `Shopify partly done (${ops} value(s), ${skus} SKU(s) still to write); DB untouched` };
+  }
+  return { state: "anomaly", detail: `mixed: Shopify pending and only part of the DB changed (${plan.dbUpdates.length}/${plan.dbKidsRows} rows pending)` };
+}
+
 export function planProblems(plan: StylePlan): string[] {
-  return [...plan.problems, ...plan.products.flatMap((p) => p.problems.map((x) => `${p.snapshot.title}: ${x}`))];
+  const out = [...plan.problems, ...plan.products.flatMap((p) => p.problems.map((x) => `${p.snapshot.title}: ${x}`))];
+  if (out.length === 0) {
+    const st = classifyState(plan);
+    if (st.state === "anomaly") out.push(`${plan.styleCode}: ${st.detail}`);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- writes
@@ -482,23 +521,49 @@ export async function verifyProduct(pp: ProductRelabelPlan, styleCode: string, o
   return { ok: checks.every((c) => c.ok), checks };
 }
 
+/** Interactive-transaction limits: Prisma's 5s default timed out on a 72-row product (P2028). */
+export const DB_TX_OPTIONS = { timeout: 120_000, maxWait: 15_000 } as const;
+
+type Tx = Prisma.TransactionClient;
+
+/**
+ * Set (shopifySize, sku) on many Variant rows in TWO statements regardless of count.
+ * The unique key (productId, colorCode, shopifySize) is checked per row while an
+ * UPDATE runs, so shifting labels ("6"->"4" while another row is still "4") can
+ * collide mid-statement. Pass 1 parks every affected row on a unique placeholder
+ * size; pass 2 writes the final values. Rows keep their ids throughout.
+ */
+export async function bulkSetVariantSizes(tx: Tx, rows: { dbId: number; size: string; sku: string }[]): Promise<void> {
+  if (rows.length === 0) return;
+  const ids = rows.map((r) => r.dbId);
+  await tx.$executeRaw`UPDATE "Variant" SET "shopifySize" = 'relabel-tmp-' || "id"::text, "updatedAt" = now() WHERE "id" IN (${Prisma.join(ids)})`;
+  const values = Prisma.join(rows.map((r) => Prisma.sql`(${r.dbId}::int, ${r.size}::text, ${r.sku}::text)`));
+  const updated = await tx.$executeRaw`
+    UPDATE "Variant" AS v SET "shopifySize" = d.size, "sku" = d.sku, "updatedAt" = now()
+    FROM (VALUES ${values}) AS d(id, size, sku)
+    WHERE v."id" = d.id`;
+  if (updated !== rows.length) throw new Error(`bulk relabel updated ${updated} of ${rows.length} rows — aborting (transaction rolls back)`);
+}
+
+async function refreshProductSizes(tx: Tx, productIds: number[]): Promise<void> {
+  for (const pid of productIds) {
+    const rows = await tx.variant.findMany({ where: { productId: pid }, select: { shopifySize: true } });
+    await tx.product.update({ where: { id: pid }, data: { sizes: [...new Set(rows.map((r) => r.shopifySize))].sort() } });
+  }
+}
+
 export async function applyDbUpdates(styleCode: string, updates: StylePlan["dbUpdates"]): Promise<void> {
-  // Ascending by new label inside one transaction so the unique key (product, color, size) is never violated mid-way.
-  const sorted = [...updates].sort((a, b) => Number(a.toSize) - Number(b.toSize));
   await prisma.$transaction(async (tx) => {
-    for (const u of sorted) await tx.variant.update({ where: { id: u.dbId }, data: { shopifySize: u.toSize, sku: u.toSku } });
-    const productIds = [...new Set(sorted.map((u) => u.productId))];
-    for (const pid of productIds) {
-      const rows = await tx.variant.findMany({ where: { productId: pid }, select: { shopifySize: true } });
-      await tx.product.update({ where: { id: pid }, data: { sizes: [...new Set(rows.map((r) => r.shopifySize))].sort() } });
-    }
-  });
+    await bulkSetVariantSizes(tx, updates.map((u) => ({ dbId: u.dbId, size: u.toSize, sku: u.toSku })));
+    await refreshProductSizes(tx, [...new Set(updates.map((u) => u.productId))]);
+  }, DB_TX_OPTIONS);
   await logEvent({ kind: "db-updated", styleCode, count: updates.length });
 }
 
 export interface ExecuteStyleResult {
   styleCode: string;
   ok: boolean;
+  resumed: boolean;
   perProduct: { productGid: string; title: string; verify: VerifyResult }[];
 }
 
@@ -506,20 +571,29 @@ export async function executeStyle(plan: StylePlan, batchId?: string): Promise<E
   const problems = planProblems(plan);
   if (problems.length > 0) throw new Error(`refusing to execute — plan has problems:\n  ${problems.join("\n  ")}`);
 
-  // 1. Pre-change state to the log BEFORE any write (rollback source).
-  const sizesBefore = await prisma.product.findMany({ where: { styleCode: plan.styleCode }, select: { id: true, sizes: true } });
-  await logEvent({
-    kind: "relabel-start",
-    styleCode: plan.styleCode,
-    batchId: batchId ?? null,
-    products: plan.products.map((p) => ({
-      productGid: p.snapshot.productGid,
-      optionId: p.snapshot.sizeOption!.id,
-      ops: p.ops,
-      before: { values: p.snapshot.sizeOption!.values, variants: p.snapshot.variants.map((v) => ({ id: v.id, sku: v.sku, size: v.size, qty: v.qty })) },
-    })),
-    db: { variants: plan.dbUpdates, productSizes: sizesBefore },
-  });
+  // 1. Pre-change state to the log BEFORE any write (rollback source). If this style already has an
+  // OPEN start entry (a previous run got partway), keep it as the rollback source and only log the resume —
+  // a second start would record half-new state as "before" and break rollback.
+  const state = classifyState(plan);
+  const resumed = await hasOpenStart(plan.styleCode);
+  if (resumed) {
+    await logEvent({ kind: "relabel-resume", styleCode: plan.styleCode, batchId: batchId ?? null, state: state.state, detail: state.detail });
+    console.log(`  resuming (${state.state}): ${state.detail}`);
+  } else {
+    const sizesBefore = await prisma.product.findMany({ where: { styleCode: plan.styleCode }, select: { id: true, sizes: true } });
+    await logEvent({
+      kind: "relabel-start",
+      styleCode: plan.styleCode,
+      batchId: batchId ?? null,
+      products: plan.products.map((p) => ({
+        productGid: p.snapshot.productGid,
+        optionId: p.snapshot.sizeOption!.id,
+        ops: p.ops,
+        before: { values: p.snapshot.sizeOption!.values, variants: p.snapshot.variants.map((v) => ({ id: v.id, sku: v.sku, size: v.size, qty: v.qty })) },
+      })),
+      db: { variants: plan.dbUpdates, productSizes: sizesBefore },
+    });
+  }
 
   const perProduct: ExecuteStyleResult["perProduct"] = [];
   // 2. Shopify: rename values (ids kept), then SKUs.
@@ -542,7 +616,7 @@ export async function executeStyle(plan: StylePlan, batchId?: string): Promise<E
     perProduct.push({ productGid: pp.snapshot.productGid, title: pp.snapshot.title, verify });
     await logEvent({ kind: "verify", styleCode: plan.styleCode, productGid: pp.snapshot.productGid, ok: verify.ok, checks: verify.checks });
   }
-  return { styleCode: plan.styleCode, ok: perProduct.every((p) => p.verify.ok), perProduct };
+  return { styleCode: plan.styleCode, ok: perProduct.every((p) => p.verify.ok), resumed, perProduct };
 }
 
 // ---------------------------------------------------------------- rollback
@@ -552,6 +626,25 @@ interface StartEntry {
   styleCode: string;
   products: { productGid: string; optionId: string; ops: RenameOp[]; before: { values: { id: string; name: string; linked: string | null }[]; variants: { id: string; sku: string }[] } }[];
   db: { variants: StylePlan["dbUpdates"]; productSizes: { id: number; sizes: string[] }[] };
+}
+
+/** True when the style's latest log event is a relabel-start (no rollback since) — i.e. a run is open/unfinished or done and not rolled back. */
+export async function hasOpenStart(styleCode: string): Promise<boolean> {
+  let raw = "";
+  try {
+    raw = await readFile(RELABEL_LOG_PATH, "utf8");
+  } catch {
+    return false;
+  }
+  let open = false;
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    const e = JSON.parse(line);
+    if (e.styleCode !== styleCode) continue;
+    if (e.kind === "relabel-start") open = true;
+    else if (e.kind === "rollback-done") open = false;
+  }
+  return open;
 }
 
 export async function lastStart(styleCode: string): Promise<StartEntry | null> {
@@ -610,12 +703,12 @@ export async function rollbackStyle(styleCode: string): Promise<VerifyResult> {
     const badSku = p.before.variants.filter((v) => final.variants.find((a) => a.id === v.id)?.sku !== v.sku);
     checks.push({ name: `${p.productGid}: SKUs restored`, ok: badSku.length === 0, detail: `${badSku.length} wrong` });
   }
-  // DB back to the logged state (descending new label so the unique key holds).
-  const rows = [...start.db.variants].sort((a, b) => Number(b.fromSize) - Number(a.fromSize));
+  // DB back to the logged state (same two-pass bulk update, so label shifts can't collide).
+  const rows = start.db.variants;
   await prisma.$transaction(async (tx) => {
-    for (const u of rows) await tx.variant.update({ where: { id: u.dbId }, data: { shopifySize: u.fromSize, sku: u.fromSku } });
+    await bulkSetVariantSizes(tx, rows.map((u) => ({ dbId: u.dbId, size: u.fromSize, sku: u.fromSku })));
     for (const ps of start.db.productSizes) await tx.product.update({ where: { id: ps.id }, data: { sizes: ps.sizes } });
-  });
+  }, DB_TX_OPTIONS);
   checks.push({ name: "DB restored", ok: true, detail: `${rows.length} rows` });
   await logEvent({ kind: "rollback-done", styleCode, checks });
   return { ok: checks.every((c) => c.ok), checks };
@@ -636,6 +729,23 @@ export async function kidsStyleCodes(): Promise<string[]> {
 /** A style still needs work when any value rename, SKU write or DB update is pending. */
 export function planIsPending(plan: StylePlan): boolean {
   return plan.dbUpdates.length > 0 || plan.products.some((p) => p.ops.length > 0 || p.skuWrites.length > 0);
+}
+
+/** Distinct styles that appear in the log (optionally one batch), in first-seen order. */
+export async function logStyles(batchId?: string): Promise<string[]> {
+  let raw = "";
+  try {
+    raw = await readFile(RELABEL_LOG_PATH, "utf8");
+  } catch {
+    return [];
+  }
+  const seen: string[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    const e = JSON.parse(line);
+    if (e.kind === "relabel-start" && (!batchId || e.batchId === batchId) && !seen.includes(e.styleCode)) seen.push(e.styleCode);
+  }
+  return seen;
 }
 
 export async function styleBatchesOfLog(batchId: string): Promise<string[]> {
