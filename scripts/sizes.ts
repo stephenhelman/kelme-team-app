@@ -13,6 +13,9 @@
  *   npm run sizes -- add-sizes --styleCode X --execute
  *   npm run sizes -- add-sizes --styleCodes A,B,C [--execute]       # several styles, in order, stopping at the first problem
  *
+ *   npm run sizes -- add-sizes --styleCode X --sizes 4XL,5XL,6XL,7XL [--method set|bulk]   # pass 2; bulk = append-only, required for live products past 100 variants
+ *   npm run sizes -- add-sizes-batch --limit 10 [--exclude A,B] [--execute]       # pass 2: next N styles, verify each, stop on first failure
+ *   npm run sizes -- add-sizes-rollback --batchId ID [--execute]                  # delete ONLY the variants that batch created (bulk method)
  *   npm run sizes -- extended-report [--styleCodes A,B]           # pass 2: read-only impact of 4XL-7XL on live products (writes extended-sizes-report.md)
  *
  *   npm run sizes -- relabel-batch --limit 10 [--exclude A,B]    # step 5: next N pending kids styles (dry-run)
@@ -41,7 +44,9 @@ import {
   type StylePlan,
   type VerifyResult,
 } from "@/lib/size-relabel";
-import { executeAdd, planAdd } from "@/lib/size-add";
+import { executeAdd, executeAddRollback, planAdd, planAddRollback } from "@/lib/size-add";
+import { VARIANT_CAP } from "@/lib/size-extended";
+import { ADULT_EXTENDED } from "@/lib/size-config";
 import { dryRunRelink } from "@/lib/shopify-relink";
 import { dryRunPush } from "@/lib/shopify-inventory-push";
 import { prisma } from "@/lib/prisma";
@@ -155,7 +160,12 @@ async function addSizes(execute: boolean) {
 
 async function addSizesOne(styleCode: string, execute: boolean) {
   const only = (arg("sizes") ?? "XXS").split(",");
+  const method = (arg("method") ?? "set") as "set" | "bulk";
+  if (method !== "set" && method !== "bulk") throw new Error("--method must be set or bulk");
   const plan = await planAdd(styleCode, only);
+  if (method === "set" && plan.shopify && plan.shopify.variants + plan.newVariants.length > VARIANT_CAP) {
+    plan.problems.push(`product would have ${plan.shopify.variants + plan.newVariants.length} variants (> ${VARIANT_CAP}); live products past ${VARIANT_CAP} are only extended with --method bulk (productVariantsBulkCreate), never productSet`);
+  }
   console.log(`style ${styleCode} (pdtid ${plan.pdtid}) — sizes ${only.join(",")}`);
   if (plan.shopify) console.log(`Shopify: ${plan.shopify.title} [${plan.shopify.status}] ${plan.shopify.productGid}, ${plan.shopify.variants} variants`);
   console.log(`Price new variants will carry: ${plan.price ? plan.price.price : "(unresolved)"}${plan.price?.compareAtPrices.length ? ` (compare-at present: ${plan.price.compareAtPrices.join(",")} — NOT copied)` : ""}`);
@@ -164,7 +174,7 @@ async function addSizesOne(styleCode: string, execute: boolean) {
   console.log(`Shopify is missing ${plan.shopifyPendingAdds} variant(s) vs the DB right now.`);
   for (const p of plan.problems) console.log(`PROBLEM: ${p}`);
   if (plan.problems.length === 0 && plan.newVariants.length === 0 && plan.shopifyPendingAdds === 0 && plan.alreadyInDb > 0) {
-    console.log("ALREADY DONE — XXS is in the DB and on Shopify; nothing to do for this style.");
+    console.log(`ALREADY DONE — ${only.join("/")} is in the DB and on Shopify; nothing to do for this style.`);
     return;
   }
   if (plan.problems.length > 0) {
@@ -177,10 +187,62 @@ async function addSizesOne(styleCode: string, execute: boolean) {
     return;
   }
   console.log("EXECUTING: capture -> guard -> reconcile/order/media/tags -> relink -> inventory push -> verify");
-  const res = await executeAdd(styleCode, only);
+  const batchId = arg("batchId") ?? `add-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  console.log(`method ${method}, BATCH ID ${batchId}${method === "bulk" ? `  (rollback: npm run sizes -- add-sizes-rollback --batchId ${batchId} --execute)` : ""}`);
+  const res = await executeAdd(styleCode, only, { method, batchId });
   for (const c of res.checks) console.log(`  ${c.ok ? "PASS" : "FAIL"}  ${c.name}${c.detail ? ` — ${c.detail}` : ""}`);
   console.log(res.ok ? "ALL CHECKS PASSED." : "CHECKS FAILED — see above.");
   if (!res.ok) process.exitCode = 1;
+}
+
+async function addSizesBatch(execute: boolean) {
+  const limit = Number(arg("limit") ?? "10");
+  const exclude = new Set((arg("exclude") ?? "").split(",").filter(Boolean));
+  const only = (arg("sizes") ?? ADULT_EXTENDED.join(",")).split(",");
+  const styles = (await liveStyleCodes()).filter((s) => !exclude.has(s));
+  console.log(`${styles.length} live styles; scanning for pending ${only.join("/")} work (products that would pass ${VARIANT_CAP} variants are skipped — they need --method bulk one at a time)...`);
+  const batch: ExtendedRow[] = [];
+  let done = 0, overCap = 0;
+  for (const styleCode of styles) {
+    const row = await planExtended(styleCode);
+    if (!row) continue;
+    if (row.problems.some((p) => !p.startsWith("extended sizes exist in color"))) {
+      console.log(`PROBLEM ${styleCode}: ${row.problems.join("; ")}`);
+      process.exitCode = 1;
+      if (execute) return console.log("STOPPED — resolve the problem (or pass --exclude) before executing.");
+      continue;
+    }
+    if (row.newVariants.length === 0) { done++; continue; }
+    if (row.overCap) { overCap++; continue; }
+    batch.push(row);
+    if (batch.length >= limit) break;
+  }
+  console.log(`already done: ${done}; skipped over the cap: ${overCap}; this batch: ${batch.length} style(s), ${batch.reduce((n, r) => n + r.newVariants.length, 0)} variant(s)`);
+  for (const r of batch) console.log(`  ${r.styleCode}: +${r.newVariants.length} (${r.currentVariants} -> ${r.afterCount}) @ ${r.prices.join("/")}  ${r.title.slice(0, 50)}`);
+  if (!execute) return console.log("DRY RUN — nothing written. Re-run with --execute (worker stopped).");
+  const batchId = `ext-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  console.log(`\nBATCH ID ${batchId}  (rollback: npm run sizes -- add-sizes-rollback --batchId ${batchId} --execute)`);
+  for (const r of batch) {
+    console.log(`\n===== ${r.styleCode}`);
+    try {
+      const res = await executeAdd(r.styleCode, only, { method: "set", batchId });
+      for (const c of res.checks) console.log(`  ${c.ok ? "PASS" : "FAIL"}  ${c.name}${c.detail ? ` — ${c.detail}` : ""}`);
+      if (!res.ok) { process.exitCode = 1; return console.log(`\nSTOPPED at ${r.styleCode} (checks failed). Batch ${batchId}.`); }
+    } catch (e) {
+      process.exitCode = 1;
+      return console.log(`\nSTOPPED at ${r.styleCode}: ${e instanceof Error ? e.message : e}. Batch ${batchId}.`);
+    }
+  }
+  console.log(`\nBATCH ${batchId} COMPLETE — ${batch.length} style(s) verified.`);
+}
+
+async function addSizesRollback(execute: boolean) {
+  const batchId = arg("batchId");
+  if (!batchId) throw new Error("--batchId is required");
+  const plan = await planAddRollback(batchId);
+  for (const p of plan.products) console.log(`${p.styleCode}: created ${p.variantIds.length}, still on Shopify ${p.existing.length}, option values added ${p.valuesAdded.join(",") || "(none)"}`);
+  if (!execute) return console.log("DRY RUN — nothing written. Deletes ONLY the variants listed in the log for this batch. Re-run with --execute.");
+  for (const line of await executeAddRollback(plan)) console.log(line);
 }
 
 async function relabelBatch(execute: boolean) {
@@ -326,7 +388,9 @@ async function main() {
   if (cmd === "drop-old-sizes") return dropOldSizes(execute);
   if (cmd === "add-sizes") return addSizes(execute);
   if (cmd === "extended-report") return extendedReport();
-  throw new Error(`unknown command "${cmd}" — expected: seed | relabel | rollback | relabel-batch | rollback-batch | add-sizes | extended-report | status | post-check | drop-old-sizes`);
+  if (cmd === "add-sizes-batch") return addSizesBatch(execute);
+  if (cmd === "add-sizes-rollback") return addSizesRollback(execute);
+  throw new Error(`unknown command "${cmd}" — expected: seed | relabel | rollback | relabel-batch | rollback-batch | add-sizes | add-sizes-batch | add-sizes-rollback | extended-report | status | post-check | drop-old-sizes`);
 }
 
 main().then(() => process.exit(process.exitCode ?? 0), (e) => { console.error(e); process.exit(1); });
