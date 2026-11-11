@@ -13,6 +13,8 @@
  *   npm run sizes -- add-sizes --styleCode X --execute
  *   npm run sizes -- add-sizes --styleCodes A,B,C [--execute]       # several styles, in order, stopping at the first problem
  *
+ *   npm run sizes -- extended-report [--styleCodes A,B]           # pass 2: read-only impact of 4XL-7XL on live products (writes extended-sizes-report.md)
+ *
  *   npm run sizes -- relabel-batch --limit 10 [--exclude A,B]    # step 5: next N pending kids styles (dry-run)
  *   npm run sizes -- relabel-batch --limit 10 --execute          # runs them one by one, verify each, stops on first failure
  *   npm run sizes -- rollback-batch --batchId ID [--execute]     # rename back every style in that batch
@@ -45,6 +47,8 @@ import { dryRunPush } from "@/lib/shopify-inventory-push";
 import { prisma } from "@/lib/prisma";
 import { sellableApparelLabels } from "@/lib/size-config";
 import { createVariables, executeSeed, planSeed } from "@/lib/size-seed";
+import { liveStyleCodes, planExtended, reportMarkdown, type ExtendedRow } from "@/lib/size-extended";
+import { writeFileSync } from "node:fs";
 
 async function seed(execute: boolean) {
   const plan = await planSeed();
@@ -288,6 +292,27 @@ async function status() {
   for (const [k, v] of Object.entries(counts)) console.log(`  ${k}: ${v.length}${k === "complete" ? "" : `  -> ${v.join(", ")}`}`);
 }
 
+async function extendedReport() {
+  const only = arg("styleCodes")?.split(",").map((x) => x.trim()).filter(Boolean);
+  const styles = only ?? (await liveStyleCodes());
+  const rows: ExtendedRow[] = [];
+  let i = 0;
+  for (const s of styles) {
+    i++;
+    if (i % 20 === 0) console.log(`  ... ${i}/${styles.length}`);
+    try {
+      const r = await planExtended(s);
+      if (r) rows.push(r);
+    } catch (e) {
+      console.log(`  ${s}: ERROR ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  const md = reportMarkdown(rows, styles.length);
+  writeFileSync("extended-sizes-report.md", md);
+  console.log(md);
+  console.log("Written: extended-sizes-report.md (read-only; nothing written to the DB or Shopify)");
+}
+
 async function main() {
   const [cmd] = process.argv.slice(2);
   const execute = process.argv.includes("--execute");
@@ -300,7 +325,8 @@ async function main() {
   if (cmd === "post-check") return postCheck();
   if (cmd === "drop-old-sizes") return dropOldSizes(execute);
   if (cmd === "add-sizes") return addSizes(execute);
-  throw new Error(`unknown command "${cmd}" — expected: seed | relabel | rollback | relabel-batch | rollback-batch | add-sizes | status | post-check | drop-old-sizes`);
+  if (cmd === "extended-report") return extendedReport();
+  throw new Error(`unknown command "${cmd}" — expected: seed | relabel | rollback | relabel-batch | rollback-batch | add-sizes | extended-report | status | post-check | drop-old-sizes`);
 }
 
 main().then(() => process.exit(process.exitCode ?? 0), (e) => { console.error(e); process.exit(1); });

@@ -237,7 +237,7 @@ export interface StylePlan {
   problems: string[];
 }
 
-async function productGidsForVariants(variantGids: string[]): Promise<Map<string, string>> {
+export async function productGidsForVariants(variantGids: string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   for (let i = 0; i < variantGids.length; i += 200) {
     const ids = variantGids.slice(i, i + 200);
