@@ -58,7 +58,7 @@ export function classifyVariantKind(shopifySize: string, productName: string): V
   if (shopifySize === "One Size") return "one-size-equipment";
   if (isBallProduct(productName)) return "ball";
   if (/^\d+$/.test(shopifySize)) return "kids-apparel";
-  if (/^(XS|S|M|L|X{0,2}L|\d+X?L)$/i.test(shopifySize)) return "adult-apparel";
+  if (/^(X{0,2}S|M|L|X{0,2}L|\d+X?L)$/i.test(shopifySize)) return "adult-apparel";
   return "other";
 }
 

@@ -8,7 +8,8 @@
  * and pushing inventory. That's a separate, later step.
  */
 import { prisma } from "@/lib/prisma";
-import { buildSku, ONE_SIZE } from "@/lib/sku";
+import { buildSku } from "@/lib/sku";
+import { classifySize, EXCLUDED_NOTE_PREFIX } from "@/lib/size-config";
 import { parseSkuSheet, type SkuSheetEntry } from "@/lib/stock";
 import { fetchFavoritesPage, fetchProductDetail, fetchSkuSheet, type RawPriceListEntry, type RawProductDetail } from "@/lib/kelme";
 
@@ -35,19 +36,6 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-// Kids gear resolves to the EU size for the SKU/Shopify side; adults and
-// one-size items keep their KELME value as-is. Never the raw cm, never US.
-const KIDS_EU_SIZE_MAP: Record<string, string> = {
-  "100cm": "2",
-  "110cm": "4",
-  "120cm": "6",
-  "130cm": "8",
-  "140cm": "10",
-  "150cm": "12",
-  "160cm": "14",
-  "170cm": "16",
-};
-
 // A bare numeric size label ("4", "110") is ambiguous on its own — it's
 // either a kids height in cm or a ball size, and the sku-sheet grid gives no
 // unit. The product name disambiguates, but a plain /ball/i test is a false
@@ -72,27 +60,14 @@ export interface ResolvedSize {
   shopifySize: string;
 }
 
-// Returns null when the size can't be resolved — the caller must flag and
-// skip that variant rather than fall back to a raw/ambiguous value, which
-// would leak an unresolved size into shopifySize/SKU.
-function resolveSize(rawLabel: string, isBall: boolean): ResolvedSize | null {
-  if (isBall) {
-    // Ball sizes are the KELME value itself — no cm, no EU mapping.
-    return { kelmeSize: rawLabel, shopifySize: rawLabel };
-  }
-  if (/^\d+$/.test(rawLabel)) {
-    // A bare number on a non-ball product is a kids height in cm.
-    const kelmeSize = `${rawLabel}cm`;
-    const shopifySize = KIDS_EU_SIZE_MAP[kelmeSize];
-    return shopifySize ? { kelmeSize, shopifySize } : null;
-  }
-  // Kelme's one-size label is Chinese (均码) — normalize it so it never
-  // leaks into a SKU or a Shopify-facing size string.
-  if (rawLabel === "均码" || rawLabel.trim() === "") {
-    return { kelmeSize: rawLabel, shopifySize: ONE_SIZE };
-  }
-  // Adult letter sizes, etc. — KELME value passes through.
-  return { kelmeSize: rawLabel, shopifySize: rawLabel };
+// Size mapping and the "excluded by policy" list live in lib/size-config.ts.
+// Returns the resolved size, "excluded" (a real size we deliberately don't
+// sell — never a blocker, reported as "not sold"), or null (unknown label:
+// the caller must flag and skip it rather than fall back to a raw value).
+export function resolveSize(rawLabel: string, isBall: boolean): ResolvedSize | "excluded" | null {
+  const c = classifySize(rawLabel, isBall);
+  if (c.status === "ok") return { kelmeSize: c.kelmeSize, shopifySize: c.shopifySize };
+  return c.status === "excluded" ? "excluded" : null;
 }
 
 // The FOB Xiamen unit cost lives in priceList as a named entry, not price.
@@ -212,6 +187,10 @@ export async function captureProduct(pdtid: number): Promise<CaptureProductResul
   let variantCount = 0;
   for (const entry of entries) {
     const resolved = resolveSize(entry.kelmeSize, isBall);
+    if (resolved === "excluded") {
+      warnings.push(`${EXCLUDED_NOTE_PREFIX} "${entry.kelmeSize}" (color ${entry.colorCode}) — not sold, not written`);
+      continue;
+    }
     if (resolved === null) {
       warnings.push(`unmapped size "${entry.kelmeSize}" (color ${entry.colorCode}) — skipped, not written`);
       continue;
@@ -315,6 +294,10 @@ export async function pullProductDeclaration(pdtid: number, styleCodeHint?: stri
   const sizesIgnored: { kelmeSize: string; reason: string }[] = [];
   for (const e of entries) {
     const resolved = resolveSize(e.kelmeSize, isBall);
+    if (resolved === "excluded") {
+      sizesIgnored.push({ kelmeSize: e.kelmeSize, reason: "excluded by policy (not sold)" });
+      continue;
+    }
     if (resolved === null) {
       sizesIgnored.push({ kelmeSize: e.kelmeSize, reason: "unresolvable size label" });
       continue;
@@ -417,7 +400,7 @@ export function buildDeclaredVariants(entries: SkuSheetEntry[], isBall: boolean,
   for (const entry of entries) {
     if (!entry.colorCode) continue;
     const resolved = resolveSize(entry.kelmeSize, isBall);
-    if (resolved === null) continue;
+    if (resolved === null || resolved === "excluded") continue;
     const { kelmeSize, shopifySize } = resolved;
     if (!allowedSizes.has(shopifySize)) continue;
     byKey.set(`${entry.colorCode}::${shopifySize}`, {

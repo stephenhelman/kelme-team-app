@@ -13,6 +13,7 @@
  *   - batchReconcile    — runs executeReconcile across every matched
  *                         product, resumable via a per-product log file.
  */
+import { requireUniformPrice } from "@/lib/shopify-price";
 import { appendFile, readFile } from "fs/promises";
 import path from "path";
 import { prisma } from "@/lib/prisma";
@@ -1020,11 +1021,21 @@ export async function executeReconcile(styleCode: string, exactTitle?: string, g
 
   const { colorValues, sizeValues } = buildOptionValues(dryRun.target);
 
+  // New variants must carry the product's current uniform price (productSet
+  // otherwise defaults them to 0.00). Mixed prices stop the run.
+  let priceFor: ((t: TargetVariant) => string) | undefined;
+  if (dryRun.toAdd.length > 0) {
+    const uniform = await requireUniformPrice(shopifyProductGid(dryRun.shopifyProductId));
+    priceFor = () => uniform.price;
+  }
+
   const shopifyProductId = await setShopifyProductStructure(
     dryRun.shopifyProductId,
     colorValues,
     sizeValues,
     dryRun.target,
+    undefined,
+    priceFor,
   );
   await sleep(CALL_PACING_MS);
 

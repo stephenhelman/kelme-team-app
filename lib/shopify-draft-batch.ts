@@ -28,9 +28,9 @@ export interface BatchSelection {
 // and other One-Size products (Color-only path) need includeNoSize — they are
 // a separate, deliberate run. Needs-split products are never selected here.
 export async function selectAllClean(opts: { includeNoSize: boolean }): Promise<BatchSelection> {
-  const { notes, generatedAt } = await loadRecordedDropNotes();
+  const { notes, excluded, generatedAt } = await loadRecordedDropNotes();
   console.log(`using dropped-size notes from the pre-flight capture of ${generatedAt}`);
-  const run = await runPreflight({ capture: false, knownDropNotes: notes });
+  const run = await runPreflight({ capture: false, knownDropNotes: notes, knownExcludedNotes: excluded });
   const selected: string[] = [];
   const skipped: BatchSelection["skipped"] = [];
   for (const r of run.results) {

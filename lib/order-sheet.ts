@@ -7,6 +7,7 @@
  */
 import { FEE_KINDS } from "./order-config";
 import { CANONICAL_SIZE_ORDER } from "./sizes";
+import { formatSizeForVendor } from "./size-config";
 import type { AuditResult, CustomizedLine, RosterEntry } from "./order-audit";
 import type { OrderLineItem, OrderPayload } from "./order-types";
 
@@ -14,6 +15,8 @@ export interface VariantInfo {
   styleCode: string;
   colorName: string;
   size: string;
+  /** Raw Kelme size ("130cm"); a "...cm" value marks a kids variant (a bare "4" alone is ambiguous with ball size 4). */
+  kelmeSize?: string;
 }
 /** Keyed by SKU. */
 export type VariantInfoBySku = Map<string, VariantInfo>;
@@ -24,6 +27,13 @@ interface ResolvedLine {
   styleCode: string;
   color: string;
   size: string;
+  /** True for kids-height variants: vendor documents show "6 (130cm)". */
+  kids: boolean;
+}
+
+/** Size as printed for the vendor. Sorting always uses the raw label. */
+function shown(r: { kids: boolean }, size: string): string {
+  return formatSizeForVendor(size, r.kids);
 }
 
 // --- shared ------------------------------------------------------------------
@@ -33,7 +43,7 @@ function sizeRank(size: string): number {
   return i === -1 ? CANONICAL_SIZE_ORDER.length + 1 : i;
 }
 
-const SIZE_TOKEN = /^(\d{1,3}(cm)?|[2-5]?x{0,2}[sml]|[2-5]?xl|2xs|xs|one size|os)$/i;
+const SIZE_TOKEN = /^(\d{1,3}(cm)?|[2-7]?x{0,2}[sml]|[2-7]?xl|2xs|xxs|xs|one size|os)$/i;
 
 /** Variant info from the DB when the SKU matches; otherwise best-effort from the variant title ("Black / M"). */
 function resolveLine(line: OrderLineItem, info: VariantInfoBySku): ResolvedLine {
@@ -53,6 +63,7 @@ function resolveLine(line: OrderLineItem, info: VariantInfoBySku): ResolvedLine 
     styleCode: v?.styleCode ?? (line.sku ? line.sku.split("-")[0] : ""),
     color,
     size,
+    kids: /cm$/i.test(v?.kelmeSize ?? ""),
   };
 }
 
@@ -131,11 +142,11 @@ export function buildCsv(order: OrderPayload, audit: AuditResult, info: VariantI
       c?.logoUrl ?? "",
     ];
     if (c && c.roster.length > 0) {
-      for (const e of sortedRoster(c.roster, r.size)) rows.push(base(e.size, e.number, e.name));
+      for (const e of sortedRoster(c.roster, r.size)) rows.push(base(shown(r, e.size), e.number, e.name));
       // Roster shorter than quantity: pad so the sheet still has one row per unit (the audit flags the gap).
-      for (let i = c.roster.length; i < r.line.quantity; i++) rows.push(base(r.size, "", ""));
+      for (let i = c.roster.length; i < r.line.quantity; i++) rows.push(base(shown(r, r.size), "", ""));
     } else {
-      for (let i = 0; i < r.line.quantity; i++) rows.push(base(r.size, "", ""));
+      for (let i = 0; i < r.line.quantity; i++) rows.push(base(shown(r, r.size), "", ""));
     }
   }
 
@@ -171,7 +182,7 @@ function detailRow(label: string, value: string): string {
 }
 
 function lineBlock(r: ResolvedLine, c: CustomizedLine): string {
-  const heading = [r.color, r.size && `Size ${r.size}`].filter(Boolean).join(" · ");
+  const heading = [r.color, r.size && `Size ${shown(r, r.size)}`].filter(Boolean).join(" · ");
 
   const logo = !c.logoUrl
     ? ""
@@ -203,7 +214,7 @@ function lineBlock(r: ResolvedLine, c: CustomizedLine): string {
             ${roster
               .map((e, i) => {
                 const td = `padding:7px 8px;font-size:15px;color:${C.ink};border-bottom:1px solid ${C.line};background:${i % 2 ? C.zebra : C.card};`;
-                return `<tr><td style="${td}color:${C.muted};">${i + 1}</td>${hasNum ? `<td style="${td}font-weight:700;">${esc(e.number)}</td>` : ""}${hasName ? `<td style="${td}">${esc(e.name)}</td>` : ""}<td style="${td}">${esc(e.size)}</td></tr>`;
+                return `<tr><td style="${td}color:${C.muted};">${i + 1}</td>${hasNum ? `<td style="${td}font-weight:700;">${esc(e.number)}</td>` : ""}${hasName ? `<td style="${td}">${esc(e.name)}</td>` : ""}<td style="${td}">${esc(shown(r, e.size))}</td></tr>`;
               })
               .join("")}
           </table></td></tr>`;
@@ -250,7 +261,7 @@ export function buildHtml(order: OrderPayload, audit: AuditResult, info: Variant
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px 0;background:${C.card};border:1px solid ${C.line};border-radius:10px;border-collapse:separate;">
           ${plain
             .map(
-              (r) => `<tr><td style="padding:10px 16px;border-bottom:1px solid ${C.line};font-size:15px;color:${C.ink};"><strong>${r.line.quantity} ×</strong> ${esc(r.title)}<div style="font-size:13px;color:${C.muted};">${esc([r.color, r.size && `Size ${r.size}`, r.line.sku].filter(Boolean).join(" · "))}</div></td></tr>`,
+              (r) => `<tr><td style="padding:10px 16px;border-bottom:1px solid ${C.line};font-size:15px;color:${C.ink};"><strong>${r.line.quantity} ×</strong> ${esc(r.title)}<div style="font-size:13px;color:${C.muted};">${esc([r.color, r.size && `Size ${shown(r, r.size)}`, r.line.sku].filter(Boolean).join(" · "))}</div></td></tr>`,
             )
             .join("")}
         </table>`;
@@ -305,19 +316,19 @@ export function buildText(order: OrderPayload, audit: AuditResult, info: Variant
   }
   const blocks = audit.customized.map((c) => ({ r: resolveLine(c.line, info), c })).sort((a, b) => compareResolved(a.r, b.r));
   for (const { r, c } of blocks) {
-    out.push(`${r.title} — ${[r.color, r.size && `Size ${r.size}`].filter(Boolean).join(", ")} (qty ${r.line.quantity})`);
+    out.push(`${r.title} — ${[r.color, r.size && `Size ${shown(r, r.size)}`].filter(Boolean).join(", ")} (qty ${r.line.quantity})`);
     if (c.logoApplication) out.push(`  Application: ${c.logoApplication}`);
     if (c.logoPlacement) out.push(`  Logo placement: ${c.logoPlacement}`);
     if (c.numberPlacement) out.push(`  Number placement: ${c.numberPlacement}`);
     if (c.printColor) out.push(`  Print color: ${c.printColor}`);
     if (c.logoUrl) out.push(`  Logo: ${c.logoUrl}`);
-    sortedRoster(c.roster, r.size).forEach((e, i) => out.push(`  ${i + 1}. #${e.number || "-"}  ${e.name || "-"}  (${e.size})`));
+    sortedRoster(c.roster, r.size).forEach((e, i) => out.push(`  ${i + 1}. #${e.number || "-"}  ${e.name || "-"}  (${shown(r, e.size)})`));
     out.push("");
   }
   const plain = audit.plainLines.map((l) => resolveLine(l, info)).sort(compareResolved);
   if (plain.length > 0) {
     out.push("ITEMS WITHOUT CUSTOMIZATION:");
-    for (const r of plain) out.push(`  ${r.line.quantity} × ${r.title} — ${[r.color, r.size && `Size ${r.size}`].filter(Boolean).join(", ")}`);
+    for (const r of plain) out.push(`  ${r.line.quantity} × ${r.title} — ${[r.color, r.size && `Size ${shown(r, r.size)}`].filter(Boolean).join(", ")}`);
     out.push("");
   }
   if (audit.fees.length > 0) {

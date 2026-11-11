@@ -1,19 +1,5 @@
 // Canonical size display order (dependency-free so pure modules like lib/order-sheet.ts can import it).
-export const CANONICAL_SIZE_ORDER = [
-  "4",
-  "6",
-  "8",
-  "10",
-  "12",
-  "14",
-  "16",
-  "2XS",
-  "XS",
-  "S",
-  "M",
-  "L",
-  "XL",
-  "2XL",
-  "3XL",
-  "One Size",
-];
+// Derived from lib/size-config.ts — edit the config, not this list.
+import { buildSizeOrder } from "./size-config";
+
+export const CANONICAL_SIZE_ORDER: string[] = buildSizeOrder();

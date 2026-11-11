@@ -50,10 +50,10 @@ async function loadVariantInfo(lines: OrderLineItem[]): Promise<VariantInfoBySku
   if (skus.length === 0) return info;
   const variants = await prisma.variant.findMany({
     where: { sku: { in: skus } },
-    select: { sku: true, colorName: true, shopifySize: true, product: { select: { styleCode: true } } },
+    select: { sku: true, colorName: true, shopifySize: true, kelmeSize: true, product: { select: { styleCode: true } } },
   });
   for (const v of variants) {
-    info.set(v.sku, { styleCode: v.product.styleCode, colorName: v.colorName, size: v.shopifySize });
+    info.set(v.sku, { styleCode: v.product.styleCode, colorName: v.colorName, size: v.shopifySize, kelmeSize: v.kelmeSize });
   }
   return info;
 }

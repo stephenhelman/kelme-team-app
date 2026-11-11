@@ -170,7 +170,8 @@ export interface PreflightInput {
   kelmeCatalogPrice: number | null;
   mainpic: string;
   variants: { colorCode: string; shopifySize: string; imageUrl: string | null }[];
-  droppedSizeNotes: string[]; // capture warnings: sizes dropped by the Size allow-list / unmapped
+  droppedSizeNotes: string[]; // capture warnings: sizes dropped by the Size allow-list / unmapped (BLOCKS)
+  excludedSizeNotes?: string[]; // policy-excluded sizes (lib/size-config.ts): reported as "not sold", never a flag
   colorsMissingGid: string[]; // colorCodes lacking Color.shopifyGid
   sizesMissingGid: string[]; // sizes lacking the GID the product's option kind needs
   familyConflicts: string[]; // sibling DB style codes and/or existing Shopify titles claiming this code
@@ -187,6 +188,7 @@ export interface PreflightResult {
   sizes: string[];
   needsSplit: boolean;
   droppedSizeNotes: string[];
+  excludedSizeNotes: string[]; // "not sold" — informational only
   colorsMissingGid: string[];
   sizesMissingGid: string[];
   familyConflicts: string[];
@@ -230,6 +232,7 @@ export function evaluatePreflight(i: PreflightInput): PreflightResult {
     sizes,
     needsSplit: i.variants.length > VARIANT_LIMIT,
     droppedSizeNotes: i.droppedSizeNotes,
+    excludedSizeNotes: i.excludedSizeNotes ?? [],
     colorsMissingGid: i.colorsMissingGid,
     sizesMissingGid: i.sizesMissingGid,
     familyConflicts: i.familyConflicts,

@@ -16,6 +16,7 @@ import { captureProductAttributes } from "@/lib/kelme-attributes";
 import { getDbTarget } from "@/lib/shopify-reconcile";
 import { dryRunRelink } from "@/lib/shopify-relink";
 import { titleHasStyleCode } from "@/lib/style-match";
+import { EXCLUDED_NOTE_PREFIX } from "@/lib/size-config";
 import { evaluatePreflight, type PreflightResult } from "@/lib/shopify-draft-plan";
 
 const CALL_PACING_MS = 400;
@@ -77,10 +78,12 @@ export function familyConflictsFor(
 // sizes declaration, attributes) and drops variant rows outside the freshly
 // declared colors × sizes. Kelme calls ride lib/kelme.ts's DB-backed token
 // path. Throws on a dead Kelme session so callers can stop the run.
-export async function recaptureProduct(c: { id: number; pdtid: number; styleCode: string }): Promise<{ dropNotes: string[]; error?: string }> {
+export async function recaptureProduct(c: { id: number; pdtid: number; styleCode: string }): Promise<{ dropNotes: string[]; excludedNotes: string[]; error?: string }> {
   const cap = await captureProduct(c.pdtid);
   const dropNotes = cap.warnings.filter((w) => /allow-list|unmapped size/.test(w));
-  if (!cap.ok) return { dropNotes, error: cap.error ?? "capture failed" };
+  // Policy-excluded sizes (lib/size-config.ts) are "not sold": reported, never a blocker.
+  const excludedNotes = cap.warnings.filter((w) => w.startsWith(EXCLUDED_NOTE_PREFIX));
+  if (!cap.ok) return { dropNotes, excludedNotes, error: cap.error ?? "capture failed" };
   await sleep(CALL_PACING_MS);
   const decl = await pullProductDeclaration(c.pdtid, c.styleCode);
   if (decl.ok) {
@@ -95,7 +98,7 @@ export async function recaptureProduct(c: { id: number; pdtid: number; styleCode
   }
   await sleep(CALL_PACING_MS);
   await captureProductAttributes(c.pdtid);
-  return { dropNotes };
+  return { dropNotes, excludedNotes };
 }
 
 export interface PreflightRun {
@@ -107,7 +110,7 @@ export interface PreflightRun {
   results: PreflightResult[];
 }
 
-export async function runPreflight(opts: { capture: boolean; only?: string[]; knownDropNotes?: Map<string, string[]> }): Promise<PreflightRun> {
+export async function runPreflight(opts: { capture: boolean; only?: string[]; knownDropNotes?: Map<string, string[]>; knownExcludedNotes?: Map<string, string[]> }): Promise<PreflightRun> {
   const [relink, titles, allProducts] = await Promise.all([
     dryRunRelink(),
     fetchShopifyTitles(),
@@ -136,6 +139,7 @@ export async function runPreflight(opts: { capture: boolean; only?: string[]; kn
   // notes recorded by the last --capture run rather than silently treating
   // every product as having none.
   const dropNotes = new Map<string, string[]>(opts.knownDropNotes ?? []);
+  const excludedNotes = new Map<string, string[]>(opts.knownExcludedNotes ?? []);
 
   if (opts.capture) {
     for (let i = 0; i < candidates.length; i++) {
@@ -144,6 +148,7 @@ export async function runPreflight(opts: { capture: boolean; only?: string[]; kn
       try {
         const rc = await recaptureProduct(c);
         dropNotes.set(c.styleCode, rc.dropNotes);
+        excludedNotes.set(c.styleCode, rc.excludedNotes);
         if (rc.error) run.captureErrors.push({ styleCode: c.styleCode, error: rc.error });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -176,6 +181,7 @@ export async function runPreflight(opts: { capture: boolean; only?: string[]; kn
       mainpic: product.mainpic,
       variants: product.variants,
       droppedSizeNotes: dropNotes.get(product.styleCode) ?? [],
+      excludedSizeNotes: excludedNotes.get(product.styleCode) ?? [],
       colorsMissingGid,
       sizesMissingGid,
       familyConflicts: familyConflictsFor(product.styleCode, allDbStyleCodes, titles),
@@ -199,7 +205,7 @@ export async function runPreflight(opts: { capture: boolean; only?: string[]; kn
 }
 
 // Dropped-size notes recorded by the last `preflight --capture` run.
-export async function loadRecordedDropNotes(): Promise<{ notes: Map<string, string[]>; generatedAt: string }> {
+export async function loadRecordedDropNotes(): Promise<{ notes: Map<string, string[]>; excluded: Map<string, string[]>; generatedAt: string }> {
   let raw: string;
   try {
     raw = await readFile(REPORT_JSON, "utf8");
@@ -208,7 +214,10 @@ export async function loadRecordedDropNotes(): Promise<{ notes: Map<string, stri
   }
   const run = JSON.parse(raw) as PreflightRun;
   if (!run.captured) throw new Error("draft-preflight.json was not produced by a --capture run — re-run `preflight --capture`");
-  return { notes: new Map(run.results.map((r) => [r.styleCode, r.droppedSizeNotes])), generatedAt: run.generatedAt };
+  return {
+    notes: new Map(run.results.map((r) => [r.styleCode, r.droppedSizeNotes])),
+    excluded: new Map(run.results.map((r) => [r.styleCode, r.excludedSizeNotes ?? []])),
+    generatedAt: run.generatedAt };
 }
 
 export function renderReport(run: PreflightRun): string {
@@ -226,6 +235,7 @@ export function renderReport(run: PreflightRun): string {
   lines.push(`- Flagged: **${run.results.length - clean.length}**`);
   lines.push(`- Needs split (>100 variants): ${run.results.filter((r) => r.needsSplit).length}`);
   lines.push(`- No variants after capture: ${run.results.filter((r) => r.variantCount === 0).length}`);
+  lines.push(`- Products with policy-excluded sizes (not sold, not a blocker): ${run.results.filter((r) => (r.excludedSizeNotes ?? []).length > 0).length}`);
   lines.push(`- Products with dropped sizes: ${run.results.filter((r) => r.droppedSizeNotes.length > 0).length}`);
   lines.push(`- Products with colors lacking shopifyGid: ${run.results.filter((r) => r.colorsMissingGid.length > 0).length}`);
   lines.push(`- Style-code family conflicts: ${run.results.filter((r) => r.familyConflicts.length > 0).length}`);

@@ -106,3 +106,18 @@ test("HTML: warnings appear before the product blocks; core-only item count in h
   assert.match(html, /27 items/);
   assert.ok(!html.includes("Heat Transfer Product")); // fee lines summarized, not listed as products
 });
+
+test("kids lines show the height next to the size in CSV, HTML and text; balls with the same number do not", () => {
+  const info = new Map(fx.variantInfo);
+  info.set("9001-110-M", { styleCode: "9001", colorName: "Black", size: "6", kelmeSize: "130cm" });
+  const order = structuredClone(fx.order1028);
+  const prop = order.line_items[0].properties.find((x) => x.name === "_roster")!;
+  prop.value = JSON.stringify(JSON.parse(prop.value).map((e: { size: string }) => ({ ...e, size: "6" })));
+  const audit = auditOrder(order, fx.tags);
+  const csv = buildCsv(order, audit, info);
+  assert.ok(csv.includes("6 (130cm)"));
+  assert.ok(buildHtml(order, audit, info).includes("6 (130cm)"));
+  // ball "4" (no cm kelmeSize) stays plain
+  const ballCsv = buildCsv(fx.orderPlain, auditOrder(fx.orderPlain, fx.tags), fx.variantInfo);
+  assert.ok(!ballCsv.includes("(110cm)") && !ballCsv.includes("4 ("));
+});
