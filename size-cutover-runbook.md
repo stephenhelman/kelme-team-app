@@ -91,3 +91,12 @@ This writes DB captures (the normal pre-flight behavior), so run it **after §C*
 | Kids relabel (batch) | `rollback-batch --batchId ID --execute` | Yes |
 | XXS added to a live product | delete the added variant(s) in admin (ids printed in the add-sizes log) | Yes, manually |
 | New size values "2"/"XXS" | leave in place | harmless |
+
+## Step 6 offline replay (read-only, 2026-11-11, live Kelme data)
+
+Under the new policy **no favorite has an unknown size**, and excluded sizes (4XL+, kids 100/170) never block. Combining that with the non-size blockers from the 2026-11-10 report: **17 of the 66 favorites not on Shopify are clean** (it was 3), because the 14 "sizes only" products are now draftable **without** their 4XL+ sizes:
+
+- Kids (3): 8651ZB32490, 8661WT3217, 8661WT3216 — never captured yet, need a first capture.
+- Adults (14): 3871001, 3801253, 3891048, 8351ZB1086, 8461WT1096 (+XXS), 8461ZB1244, 8451QB1031 (+XXS), 8451QB1030 (+XXS), 8651ZB12488 (not in DB yet), 3802255, ZB90511001, 3991536, 3801286, 8361WT1084.
+
+The other 49 stay blocked by category rules, new colors, images or style-code families (unchanged by sizes). Business consequence to confirm: these 14 would be listed **without 4XL–7XL** until pass 2 adds them to live products via the same add path. Confirm with `drafts preflight --capture` after the cutover; drafts also need the `2`/`XXS` Size GIDs from §A.
