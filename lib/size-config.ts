@@ -32,8 +32,8 @@ export const ADULT_ALIASES: Record<string, string> = { "2XS": "XXS" };
 
 export const ADULT_BASE: string[] = ["XXS", "XS", "S", "M", "L", "XL", "2XL", "3XL"];
 
-/** Pass 2: set to ["4XL", "5XL", "6XL", "7XL"] to sell them (they also need Size rows + Shopify GIDs). */
-export const ADULT_EXTENDED: string[] = [];
+/** Pass 2: sold above 3XL. They also need Size rows + Shopify GIDs (`npm run sizes -- seed`). 8XL+ stay policy-excluded. */
+export const ADULT_EXTENDED: string[] = ["4XL", "5XL", "6XL", "7XL"];
 
 /** Every adult size above 3XL that Kelme sends; whatever is not in ADULT_EXTENDED is policy-excluded. */
 const ADULT_ABOVE_BASE = ["4XL", "5XL", "6XL", "7XL", "8XL", "9XL", "10XL", "11XL"];
