@@ -16,6 +16,9 @@
  *   npm run sizes -- relabel-batch --limit 10 --execute          # runs them one by one, verify each, stops on first failure
  *   npm run sizes -- rollback-batch --batchId ID [--execute]     # rename back every style in that batch
  *
+ *   npm run sizes -- post-check                                   # step 5 end: read-only DB<->Shopify link + inventory dry-run summary
+ *   npm run sizes -- drop-old-sizes [--execute]                   # remove Size rows no longer sold (14, 16, 2XS) once no variant uses them
+ *
  * Stop the Railway worker before any --execute (see the cutover runbook).
  */
 import {
@@ -33,6 +36,10 @@ import {
   type VerifyResult,
 } from "@/lib/size-relabel";
 import { executeAdd, planAdd } from "@/lib/size-add";
+import { dryRunRelink } from "@/lib/shopify-relink";
+import { dryRunPush } from "@/lib/shopify-inventory-push";
+import { prisma } from "@/lib/prisma";
+import { sellableApparelLabels } from "@/lib/size-config";
 import { createVariables, executeSeed, planSeed } from "@/lib/size-seed";
 
 async function seed(execute: boolean) {
@@ -210,6 +217,36 @@ async function rollbackBatch(execute: boolean) {
   }
 }
 
+async function postCheck() {
+  const relink = await dryRunRelink();
+  console.log(`DB variants ${relink.totalDbVariants}, matched to Shopify ${relink.matchedCount}, ambiguous ${relink.ambiguousMatchCount}`);
+  console.log(`DB variants with no Shopify match: ${relink.dbUnmatched.length}; Shopify variants with no DB match: ${relink.shopifyUnmatched.length}; real link failures: ${relink.realLinkFailures.length}`);
+  for (const u of relink.dbUnmatched.slice(0, 15)) console.log(`  db-unmatched ${JSON.stringify(u)}`);
+  for (const u of relink.shopifyUnmatched.slice(0, 15)) console.log(`  shopify-unmatched ${JSON.stringify(u)}`);
+  const push = await dryRunPush();
+  console.log(`inventory push: ${push.totalOnShopifyVariants} linked variants, already correct ${push.alreadyCorrect}, would push ${push.toPush.length}, suspicious drops ${push.suspiciousDrops.length}, tracking disabled ${push.trackingDisabledCount}, null inventory item ${push.nullInventoryItemId.length}`);
+  for (const c of push.toPush.slice(0, 15)) console.log(`  push ${c.sku}: ${c.currentOnHand} -> ${c.targetQty}`);
+  const oldLabels = await prisma.variant.count({ where: { shopifySize: { in: ["14", "16", "2XS"] }, kelmeSize: { not: { in: ["5", "4", "3", "1"] } } } });
+  console.log(`DB variants still on retired labels 14/16/2XS: ${oldLabels} (expect 0)`);
+  console.log("EXPECTED after a clean cutover: unmatched 0 on both sides, real link failures 0, retired labels 0, and push candidates only where Kelme stock moved since the cutover.");
+}
+
+async function dropOldSizes(execute: boolean) {
+  const keep = new Set([...sellableApparelLabels(), "One Size", "1", "3", "4", "5"]);
+  const rows = await prisma.size.findMany();
+  const stale = rows.filter((r) => !keep.has(r.shopifySize));
+  for (const r of stale) {
+    const used = await prisma.variant.count({ where: { shopifySize: r.shopifySize } });
+    console.log(`Size row "${r.shopifySize}" (${r.kind}): ${used} DB variant(s) still use it${used > 0 ? " — NOT safe to drop" : ""}`);
+  }
+  if (stale.length === 0) return console.log("nothing to drop");
+  if (!execute) return console.log("DRY RUN — nothing written. Re-run with --execute.");
+  const safe = [];
+  for (const r of stale) if ((await prisma.variant.count({ where: { shopifySize: r.shopifySize } })) === 0) safe.push(r.shopifySize);
+  await prisma.size.deleteMany({ where: { shopifySize: { in: safe } } });
+  console.log(`dropped: ${safe.join(", ") || "(none)"}`);
+}
+
 async function main() {
   const [cmd] = process.argv.slice(2);
   const execute = process.argv.includes("--execute");
@@ -218,8 +255,10 @@ async function main() {
   if (cmd === "rollback") return rollback(execute);
   if (cmd === "relabel-batch") return relabelBatch(execute);
   if (cmd === "rollback-batch") return rollbackBatch(execute);
+  if (cmd === "post-check") return postCheck();
+  if (cmd === "drop-old-sizes") return dropOldSizes(execute);
   if (cmd === "add-sizes") return addSizes(execute);
-  throw new Error(`unknown command "${cmd}" — expected: seed | relabel | rollback | relabel-batch | rollback-batch | add-sizes`);
+  throw new Error(`unknown command "${cmd}" — expected: seed | relabel | rollback | relabel-batch | rollback-batch | add-sizes | post-check | drop-old-sizes`);
 }
 
 main().then(() => process.exit(process.exitCode ?? 0), (e) => { console.error(e); process.exit(1); });
