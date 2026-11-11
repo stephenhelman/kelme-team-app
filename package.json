@@ -20,7 +20,8 @@
     "drafts": "tsx --env-file=.env scripts/drafts.ts",
     "shipping:weights": "tsx --env-file=.env scripts/shipping-weights.ts",
     "shipping:canary-weight": "tsx --env-file=.env scripts/shipping-canary-weight.ts",
-    "shipping:rates": "tsx --env-file=.env scripts/shipping-rates.ts"
+    "shipping:rates": "tsx --env-file=.env scripts/shipping-rates.ts",
+    "sizes": "tsx --env-file=.env scripts/sizes.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
