@@ -16,7 +16,7 @@ import { shopifyGraphQL } from "./shopify";
 import { sendEmail } from "./email";
 import { sendAdminAlert } from "./admin-notify";
 import { auditOrder, type TagsByProductId } from "./order-audit";
-import { buildCsv, buildHtml, buildSubject, buildText, type VariantInfoBySku } from "./order-sheet";
+import { buildCsv, buildHtml, buildSubject, buildText, sizingFlags, type VariantInfoLookup } from "./order-sheet";
 import type { OrderLineItem, OrderPayload } from "./order-types";
 
 export const MAX_ATTEMPTS = 5;
@@ -44,18 +44,25 @@ export async function fetchProductTags(productIds: number[]): Promise<TagsByProd
   return out;
 }
 
-async function loadVariantInfo(lines: OrderLineItem[]): Promise<VariantInfoBySku> {
+// Size, cm height and color come from the DB Variant behind line.variant_id (its
+// current label — variant ids survive the kids relabel). SKU is only a flagged
+// fallback: old SKUs are reused by a different size after the relabel.
+async function loadVariantInfo(lines: OrderLineItem[]): Promise<VariantInfoLookup> {
+  const byVariantId: VariantInfoLookup["byVariantId"] = new Map();
+  const bySku: VariantInfoLookup["bySku"] = new Map();
+  const gids = [...new Set(lines.map((l) => l.variant_id).filter((id): id is number => id != null))].map((id) => `gid://shopify/ProductVariant/${id}`);
   const skus = [...new Set(lines.map((l) => l.sku).filter((s): s is string => !!s))];
-  const info: VariantInfoBySku = new Map();
-  if (skus.length === 0) return info;
+  if (gids.length === 0 && skus.length === 0) return { byVariantId, bySku };
   const variants = await prisma.variant.findMany({
-    where: { sku: { in: skus } },
-    select: { sku: true, colorName: true, shopifySize: true, kelmeSize: true, product: { select: { styleCode: true } } },
+    where: { OR: [{ shopifyVariantId: { in: gids } }, { sku: { in: skus } }] },
+    select: { sku: true, shopifyVariantId: true, colorName: true, shopifySize: true, kelmeSize: true, product: { select: { styleCode: true } } },
   });
   for (const v of variants) {
-    info.set(v.sku, { styleCode: v.product.styleCode, colorName: v.colorName, size: v.shopifySize, kelmeSize: v.kelmeSize });
+    const info = { styleCode: v.product.styleCode, colorName: v.colorName, size: v.shopifySize, kelmeSize: v.kelmeSize };
+    if (v.shopifyVariantId) byVariantId.set(Number(v.shopifyVariantId.split("/").pop()), info);
+    if (skus.includes(v.sku)) bySku.set(v.sku, info);
   }
-  return info;
+  return { byVariantId, bySku };
 }
 
 // --- processing ------------------------------------------------------------------
@@ -68,6 +75,8 @@ export async function processOrderFile(row: OrderFile): Promise<void> {
   const tags = await fetchProductTags(order.line_items.map((l) => l.product_id).filter((id): id is number => id != null));
   const audit = auditOrder(order, tags);
   const info = await loadVariantInfo([...audit.coreLines, ...audit.otherLines]);
+  // Lines whose size could only be guessed from SKU/title are surfaced as warnings (and stored with the audit flags).
+  audit.flags.push(...sizingFlags(audit, info));
 
   const subject = buildSubject(order, audit);
   const csv = buildCsv(order, audit, info);

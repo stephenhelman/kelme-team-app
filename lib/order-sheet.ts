@@ -8,7 +8,7 @@
 import { FEE_KINDS } from "./order-config";
 import { CANONICAL_SIZE_ORDER } from "./sizes";
 import { formatSizeForVendor } from "./size-config";
-import type { AuditResult, CustomizedLine, RosterEntry } from "./order-audit";
+import type { AuditFlag, AuditResult, CustomizedLine, RosterEntry } from "./order-audit";
 import type { OrderLineItem, OrderPayload } from "./order-types";
 
 export interface VariantInfo {
@@ -18,8 +18,21 @@ export interface VariantInfo {
   /** Raw Kelme size ("130cm"); a "...cm" value marks a kids variant (a bare "4" alone is ambiguous with ball size 4). */
   kelmeSize?: string;
 }
-/** Keyed by SKU. */
+/** Keyed by SKU. Legacy/fallback lookup only: after the kids relabel SKUs are reused by a different size. */
 export type VariantInfoBySku = Map<string, VariantInfo>;
+
+/**
+ * Variant info for an order. `byVariantId` (Shopify variant id, which survives
+ * the relabel) is authoritative; `bySku` is only a flagged fallback.
+ */
+export interface VariantInfoLookup {
+  byVariantId: Map<number, VariantInfo>;
+  bySku: VariantInfoBySku;
+}
+
+export function asLookup(info: VariantInfoBySku | VariantInfoLookup): VariantInfoLookup {
+  return info instanceof Map ? { byVariantId: new Map(), bySku: info } : info;
+}
 
 interface ResolvedLine {
   line: OrderLineItem;
@@ -29,6 +42,8 @@ interface ResolvedLine {
   size: string;
   /** True for kids-height variants: vendor documents show "6 (130cm)". */
   kids: boolean;
+  /** Where size/color came from: the variant id (authoritative), the SKU (flagged), or the variant title (flagged). */
+  source: "variant" | "sku" | "title";
 }
 
 /** Size as printed for the vendor. Sorting always uses the raw label. */
@@ -45,9 +60,19 @@ function sizeRank(size: string): number {
 
 const SIZE_TOKEN = /^(\d{1,3}(cm)?|[2-7]?x{0,2}[sml]|[2-7]?xl|2xs|xxs|xs|one size|os)$/i;
 
-/** Variant info from the DB when the SKU matches; otherwise best-effort from the variant title ("Black / M"). */
-function resolveLine(line: OrderLineItem, info: VariantInfoBySku): ResolvedLine {
-  const v = line.sku ? info.get(line.sku) : undefined;
+/**
+ * Size, kids height and color come from the DB Variant behind line.variant_id
+ * (current label + cm). Only if the id is missing/unknown do we fall back to the
+ * SKU, then to the variant title ("Black / M") — both are flagged by sizingFlags
+ * because carts built before the kids relabel carry old labels and reused SKUs.
+ */
+function resolveLine(line: OrderLineItem, lookup: VariantInfoLookup): ResolvedLine {
+  let v = line.variant_id != null ? lookup.byVariantId.get(line.variant_id) : undefined;
+  let source: ResolvedLine["source"] = "variant";
+  if (!v) {
+    v = line.sku ? lookup.bySku.get(line.sku) : undefined;
+    source = v ? "sku" : "title";
+  }
   let color = v?.colorName ?? "";
   let size = v?.size ?? "";
   if (!color || !size) {
@@ -56,6 +81,7 @@ function resolveLine(line: OrderLineItem, info: VariantInfoBySku): ResolvedLine 
       if (!size && SIZE_TOKEN.test(p)) size = p;
       else if (!color) color = p;
     }
+    if (source !== "title") source = "title";
   }
   return {
     line,
@@ -64,7 +90,44 @@ function resolveLine(line: OrderLineItem, info: VariantInfoBySku): ResolvedLine 
     color,
     size,
     kids: /cm$/i.test(v?.kelmeSize ?? ""),
+    source,
   };
+}
+
+const FALLBACK_REASON: Record<"sku" | "title", string> = {
+  sku: "taken from the SKU because the line has no known variant id — SKUs were reused when kids sizes were relabeled, so verify it",
+  title: "read from the variant title (no DB match by variant id or SKU) — verify it",
+};
+
+/** Audit flags for lines whose size could not be resolved from the variant id. Pure. */
+export function sizingFlags(audit: AuditResult, info: VariantInfoBySku | VariantInfoLookup): AuditFlag[] {
+  const lk = asLookup(info);
+  const flags: AuditFlag[] = [];
+  for (const line of [...audit.coreLines, ...audit.otherLines]) {
+    const r = resolveLine(line, lk);
+    if (r.source === "variant") continue;
+    flags.push({
+      code: "SIZE_UNVERIFIED",
+      lineId: line.id,
+      message: `${line.title}${line.variant_title ? ` (${line.variant_title})`: ""}: size ${r.size ? `"${r.size}" ` : "unknown, "}${FALLBACK_REASON[r.source]}.`,
+    });
+  }
+  return flags;
+}
+
+/** Informational notes (not warnings). Currently: roster sizes that were stale vs the line's current size. */
+export function sizingInfos(audit: AuditResult, info: VariantInfoBySku | VariantInfoLookup): string[] {
+  const lk = asLookup(info);
+  const out: string[] = [];
+  for (const c of audit.customized) {
+    const r = resolveLine(c.line, lk);
+    if (!r.size) continue;
+    const stale = c.roster.filter((e) => e.size && e.size !== r.size);
+    if (stale.length > 0) {
+      out.push(`${c.line.title}: roster labels updated to current sizing — ${stale.length} player row(s) were saved as ${[...new Set(stale.map((e) => e.size))].join("/")}, now shown as ${shown(r, r.size)}.`);
+    }
+  }
+  return out;
 }
 
 function compareResolved(a: ResolvedLine, b: ResolvedLine): number {
@@ -77,9 +140,10 @@ function compareResolved(a: ResolvedLine, b: ResolvedLine): number {
 }
 
 /** Roster entries sorted by size then jersey number; numberless entries last. */
-function sortedRoster(roster: RosterEntry[], fallbackSize: string): (RosterEntry & { size: string })[] {
+function sortedRoster(roster: RosterEntry[], lineSize: string): (RosterEntry & { size: string })[] {
+  // The line's current size wins over whatever label the cart stored in _roster (it may predate the relabel).
   return roster
-    .map((e) => ({ ...e, size: e.size || fallbackSize }))
+    .map((e) => ({ ...e, size: lineSize || e.size }))
     .sort((a, b) => {
       const an = a.number === "" ? Infinity : Number(a.number);
       const bn = b.number === "" ? Infinity : Number(b.number);
@@ -119,7 +183,8 @@ function csvCell(value: string): string {
 }
 
 /** One row per unit across all non-fee lines. Fee lines are not goods and are excluded. */
-export function buildCsv(order: OrderPayload, audit: AuditResult, info: VariantInfoBySku): string {
+export function buildCsv(order: OrderPayload, audit: AuditResult, infoIn: VariantInfoBySku | VariantInfoLookup): string {
+  const info = asLookup(infoIn);
   const rows: string[][] = [];
   const customizedByLine = new Map<number, CustomizedLine>(audit.customized.map((c) => [c.line.id, c]));
   const goods = [...audit.coreLines, ...audit.otherLines].map((l) => resolveLine(l, info)).sort(compareResolved);
@@ -236,7 +301,9 @@ function sectionTitle(text: string): string {
   return `<div style="font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:${C.muted};padding:8px 2px 8px 2px;">${esc(text)}</div>`;
 }
 
-export function buildHtml(order: OrderPayload, audit: AuditResult, info: VariantInfoBySku): string {
+export function buildHtml(order: OrderPayload, audit: AuditResult, infoIn: VariantInfoBySku | VariantInfoLookup): string {
+  const info = asLookup(infoIn);
+  const infoNotes = sizingInfos(audit, info);
   const customized = new Map(audit.customized.map((c) => [c.line.id, c]));
   const blocks = audit.customized
     .map((c) => ({ r: resolveLine(c.line, info), c }))
@@ -253,6 +320,11 @@ export function buildHtml(order: OrderPayload, audit: AuditResult, info: Variant
             </ul>
           </td></tr></table>`
       : `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px 0;background:${C.okBg};border-radius:8px;border-collapse:separate;"><tr><td style="padding:10px 16px;font-size:14px;color:${C.okInk};font-weight:600;">✓ All order checks passed</td></tr></table>`;
+
+  const infoBox =
+    infoNotes.length > 0
+      ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px 0;background:${C.card};border:1px solid ${C.line};border-radius:8px;border-collapse:separate;"><tr><td style="padding:10px 16px;font-size:13px;color:${C.muted};line-height:1.45;">${infoNotes.map((n) => `ℹ ${esc(n)}`).join("<br>")}</td></tr></table>`
+      : "";
 
   const plainSection =
     plain.length === 0
@@ -292,7 +364,7 @@ export function buildHtml(order: OrderPayload, audit: AuditResult, info: Variant
       <div style="font-size:26px;font-weight:800;line-height:1.2;">Order ${esc(order.name)}</div>
       <div style="font-size:15px;color:${C.muted};padding-top:4px;">${esc(itemsLine)} · ${esc(custLine)}${created ? ` · ${esc(created)}` : ""}</div>
     </td></tr>
-    <tr><td>${flags}</td></tr>
+    <tr><td>${flags}${infoBox}</td></tr>
     <tr><td>
       ${blocks.length > 0 ? sectionTitle("Customized items") : ""}
       ${blocks.map(({ r, c }) => lineBlock(r, customized.get(r.line.id) ?? c)).join("")}
@@ -307,13 +379,17 @@ export function buildHtml(order: OrderPayload, audit: AuditResult, info: Variant
 
 // --- plain text --------------------------------------------------------------
 
-export function buildText(order: OrderPayload, audit: AuditResult, info: VariantInfoBySku): string {
+export function buildText(order: OrderPayload, audit: AuditResult, infoIn: VariantInfoBySku | VariantInfoLookup): string {
+  const info = asLookup(infoIn);
+  const infoNotes = sizingInfos(audit, info);
   const out: string[] = [`ORDER ${order.name}`, `${audit.coreCount} items · ${audit.customized.length} customized line(s)`, ""];
   if (audit.flags.length > 0) {
     out.push("PLEASE CHECK BEFORE PRODUCING:");
     for (const f of audit.flags) out.push(`  ! ${f.message}`);
     out.push("");
   }
+  for (const n of infoNotes) out.push(`  i ${n}`);
+  if (infoNotes.length > 0) out.push("");
   const blocks = audit.customized.map((c) => ({ r: resolveLine(c.line, info), c })).sort((a, b) => compareResolved(a.r, b.r));
   for (const { r, c } of blocks) {
     out.push(`${r.title} — ${[r.color, r.size && `Size ${shown(r, r.size)}`].filter(Boolean).join(", ")} (qty ${r.line.quantity})`);

@@ -65,7 +65,8 @@ export type AuditFlagCode =
   | "LOGO_URL_SUSPICIOUS"
   | "UNKNOWN_PLACEMENT"
   | "UNRECOGNIZED_FEE_LINE"
-  | "UNCLASSIFIED_LINE";
+  | "UNCLASSIFIED_LINE"
+  | "SIZE_UNVERIFIED";
 
 export interface AuditFlag {
   code: AuditFlagCode;
