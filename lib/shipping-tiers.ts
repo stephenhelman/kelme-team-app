@@ -5,9 +5,11 @@
  */
 import {
   EXACT_UP_TO,
+  EXPRESS_DESCRIPTION,
   EXPRESS_NAME,
   EXPRESS_RATE_PER_UNIT,
   MAX_UNITS,
+  STANDARD_DESCRIPTION,
   STANDARD_NAME,
   STANDARD_RATE_PER_UNIT,
   STEP_UNITS,
@@ -25,11 +27,12 @@ export interface WeightTier {
 export interface ServiceSpec {
   name: string;
   perUnit: number;
+  description: string;
 }
 
 export const SERVICES: ServiceSpec[] = [
-  { name: STANDARD_NAME, perUnit: STANDARD_RATE_PER_UNIT },
-  { name: EXPRESS_NAME, perUnit: EXPRESS_RATE_PER_UNIT },
+  { name: STANDARD_NAME, perUnit: STANDARD_RATE_PER_UNIT, description: STANDARD_DESCRIPTION },
+  { name: EXPRESS_NAME, perUnit: EXPRESS_RATE_PER_UNIT, description: EXPRESS_DESCRIPTION },
 ];
 
 /** Round to 1 dp: all bounds are n +/- 0.5 / 0.4, so 1 dp is exact and kills float noise. */
@@ -78,6 +81,7 @@ export interface ObservedRate {
   price: string;
   minLb: number | null;
   maxLb: number | null;
+  description?: string;
 }
 
 /** Does a cart of `weightLb` qualify for this rate? Mirrors Shopify's inclusive >= / <= conditions. */
@@ -103,6 +107,7 @@ export function diffLadder(zone: string, observed: ObservedRate[], tiers: Weight
         continue;
       }
       used.add(m);
+      if ((m.description ?? "") !== svc.description) out.push({ zone, what: `${svc.name} tier ${t.minLb}-${t.maxLb} lb description "${m.description ?? ""}", expected "${svc.description}"` });
       if (m.price !== want) out.push({ zone, what: `${svc.name} tier ${t.minLb}-${t.maxLb} lb price $${m.price}, expected $${want}` });
     }
     for (const r of live) if (!used.has(r)) out.push({ zone, what: `${svc.name} has an UNEXPECTED rate ${r.minLb}-${r.maxLb} lb $${r.price}` });

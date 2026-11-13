@@ -32,6 +32,8 @@ export interface LiveMethod {
   description: string | null;
   /** DeliveryRateDefinition (flat rate we can recreate) vs DeliveryParticipant (carrier-calculated; never touched). */
   kind: "rate" | "participant";
+  /** The rate definition's own id (needed to update the price in place). */
+  rateId: string | null;
   price: string | null;
   currency: string | null;
   conditions: LiveCondition[];
@@ -84,7 +86,7 @@ const PROFILE_QUERY = `
                   id name active description
                   rateProvider {
                     __typename
-                    ... on DeliveryRateDefinition { price { amount currencyCode } }
+                    ... on DeliveryRateDefinition { id price { amount currencyCode } }
                   }
                   methodConditions {
                     id field operator
@@ -109,7 +111,7 @@ interface RawMethod {
   name: string;
   active: boolean;
   description: string | null;
-  rateProvider: { __typename: string; price?: { amount: string; currencyCode: string } };
+  rateProvider: { __typename: string; id?: string; price?: { amount: string; currencyCode: string } };
   methodConditions: {
     id: string;
     field: LiveCondition["field"];
@@ -148,6 +150,7 @@ function toMethod(m: RawMethod): LiveMethod {
     active: m.active,
     description: m.description,
     kind: isRate ? "rate" : "participant",
+    rateId: isRate ? (m.rateProvider.id ?? null) : null,
     price: m.rateProvider.price?.amount ?? null,
     currency: m.rateProvider.price?.currencyCode ?? null,
     conditions: m.methodConditions.map((c) => ({
@@ -201,21 +204,18 @@ export async function readGeneralProfile(): Promise<LiveProfile> {
 
 // --- derived views ---------------------------------------------------------
 
+export function methodBounds(m: LiveMethod): { minLb: number | null; maxLb: number | null } {
+  const w = m.conditions.filter((c) => c.field === "TOTAL_WEIGHT");
+  const lb = (c: LiveCondition) => weightInLb({ value: c.value, unit: c.unit ?? "POUNDS" });
+  const min = w.find((c) => c.operator === "GREATER_THAN_OR_EQUAL_TO");
+  const max = w.find((c) => c.operator === "LESS_THAN_OR_EQUAL_TO");
+  return { minLb: min ? r1(lb(min) ?? NaN) : null, maxLb: max ? r1(lb(max) ?? NaN) : null };
+}
+
 export function observedRates(zone: LiveZone): ObservedRate[] {
   return zone.methods
     .filter((m) => m.kind === "rate" && m.active && m.price !== null)
-    .map((m) => {
-      const w = m.conditions.filter((c) => c.field === "TOTAL_WEIGHT");
-      const lb = (c: LiveCondition) => weightInLb({ value: c.value, unit: c.unit ?? "POUNDS" });
-      const min = w.find((c) => c.operator === "GREATER_THAN_OR_EQUAL_TO");
-      const max = w.find((c) => c.operator === "LESS_THAN_OR_EQUAL_TO");
-      return {
-        name: m.name,
-        price: Number(m.price).toFixed(2),
-        minLb: min ? r1(lb(min) ?? NaN) : null,
-        maxLb: max ? r1(lb(max) ?? NaN) : null,
-      };
-    });
+    .map((m) => ({ name: m.name, price: Number(m.price).toFixed(2), description: m.description ?? "", ...methodBounds(m) }));
 }
 
 export const isFallback = (m: LiveMethod): boolean => m.name.trim().toLowerCase() === FALLBACK_RATE_NAME.toLowerCase();
@@ -263,9 +263,10 @@ export interface MethodCreate {
   priceConditionsToCreate?: { operator: string; criteria: { amount: string; currencyCode: string } }[];
 }
 
-export function tierMethod(name: string, perUnit: number, t: WeightTier, currency: string): MethodCreate {
+export function tierMethod(name: string, perUnit: number, t: WeightTier, currency: string, description?: string): MethodCreate {
   return {
     name,
+    ...(description ? { description } : {}),
     active: true,
     rateDefinition: { price: { amount: priceStr(t.units, perUnit), currencyCode: currency } },
     weightConditionsToCreate: [
@@ -292,11 +293,19 @@ export function methodFromLive(m: LiveMethod, fallbackCurrency: string): MethodC
   };
 }
 
+/** In-place change of an existing rate's price/description (conditions untouched). */
+export interface MethodUpdate {
+  id: string;
+  description: string;
+  rateDefinition: { id: string; price: { amount: string; currencyCode: string } };
+}
+
 export interface ZoneWork {
   zoneId: string;
   zoneName: string;
   deleteIds: string[];
   create: MethodCreate[];
+  update?: MethodUpdate[];
 }
 
 const UPDATE = `
@@ -319,7 +328,9 @@ export async function sendUpdate(profile: LiveProfile, work: ZoneWork[]): Promis
     locationGroupsToUpdate: [
       {
         id: profile.locationGroupId,
-        zonesToUpdate: work.map((w) => ({ id: w.zoneId, ...(w.create.length > 0 ? { methodDefinitionsToCreate: w.create } : {}) })),
+        zonesToUpdate: work.map((w) => ({ id: w.zoneId, ...(w.create.length > 0 ? { methodDefinitionsToCreate: w.create } : {}),
+          ...(w.update && w.update.length > 0 ? { methodDefinitionsToUpdate: w.update } : {}),
+        })),
       },
     ],
     ...(work.some((w) => w.deleteIds.length > 0) ? { methodDefinitionsToDelete: work.flatMap((w) => w.deleteIds) } : {}),
@@ -330,6 +341,7 @@ export async function sendUpdate(profile: LiveProfile, work: ZoneWork[]): Promis
     event: "update",
     zones: work.map((w) => w.zoneId),
     created: work.reduce((n, w) => n + w.create.length, 0),
+    updated: work.reduce((n, w) => n + (w.update?.length ?? 0), 0),
     deleted: work.reduce((n, w) => n + w.deleteIds.length, 0),
     errors,
   });
@@ -351,18 +363,20 @@ export function planRequests(work: ZoneWork[]): ZoneWork[][] {
     curN = 0;
   };
   for (const w of work) {
-    let rest = w.create;
+    let creates = w.create;
+    let updates = w.update ?? [];
     let deletes = w.deleteIds;
     do {
-      const room = MAX_METHODS_PER_REQUEST - curN;
-      if (room <= 0 || cur.length >= ZONES_PER_REQUEST) flush();
-      const take = rest.slice(0, MAX_METHODS_PER_REQUEST - curN);
-      cur.push({ zoneId: w.zoneId, zoneName: w.zoneName, deleteIds: deletes, create: take });
-      curN += take.length;
-      rest = rest.slice(take.length);
+      if (curN >= MAX_METHODS_PER_REQUEST || cur.length >= ZONES_PER_REQUEST) flush();
+      const takeC = creates.slice(0, MAX_METHODS_PER_REQUEST - curN);
+      const takeU = updates.slice(0, MAX_METHODS_PER_REQUEST - curN - takeC.length);
+      cur.push({ zoneId: w.zoneId, zoneName: w.zoneName, deleteIds: deletes, create: takeC, update: takeU });
+      curN += takeC.length + takeU.length;
+      creates = creates.slice(takeC.length);
+      updates = updates.slice(takeU.length);
       deletes = [];
-      if (rest.length > 0) flush();
-    } while (rest.length > 0);
+      if (creates.length + updates.length > 0) flush();
+    } while (creates.length + updates.length > 0);
   }
   flush();
   return requests;

@@ -13,8 +13,11 @@ export const FEE_REQUIRES_SHIPPING = false;
 /** Fee product titles (tagged customize_charge). */
 export const FEE_PRODUCT_TITLES = ["Heat Transfer Product", "Patch Product", "Number Customization", "Name Customization"];
 
-export const STANDARD_RATE_PER_UNIT = 2.7;
-export const EXPRESS_RATE_PER_UNIT = 4.2;
+export const STANDARD_RATE_PER_UNIT = 2.0;
+export const EXPRESS_RATE_PER_UNIT = 3.5;
+/** Delivery detail shown with each rate at checkout (the rate's description). */
+export const STANDARD_DESCRIPTION = "About 20 days after it ships";
+export const EXPRESS_DESCRIPTION = "About 10 days after it ships";
 export const STANDARD_NAME = "Standard Shipping";
 export const EXPRESS_NAME = "Express Shipping";
 

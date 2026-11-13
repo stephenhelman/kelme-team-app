@@ -2,8 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildTiers, checkCarts, diffLadder, exactTier, expectedPrice, pricedUnits, stepTier, type ObservedRate } from "../lib/shipping-tiers";
 
+const DESC: Record<string, string> = { "Standard Shipping": "About 20 days after it ships", "Express Shipping": "About 10 days after it ships" };
 const observedFrom = (name: string, perUnit: number, tiers = buildTiers()): ObservedRate[] =>
-  tiers.map((t) => ({ name, price: (Math.round(t.units * perUnit * 100) / 100).toFixed(2), minLb: t.minLb, maxLb: t.maxLb }));
+  tiers.map((t) => ({ name, price: (Math.round(t.units * perUnit * 100) / 100).toFixed(2), description: DESC[name], minLb: t.minLb, maxLb: t.maxLb }));
 
 test("boundaries: >= N-0.5 and <= N+0.4", () => {
   assert.deepEqual(exactTier(25), { minLb: 24.5, maxLb: 25.4, units: 25 });
@@ -26,18 +27,18 @@ test("short final step when MAX isn't a multiple of 5 from EXACT_UP_TO", () => {
 });
 
 test("pricing at the upper edge: never undercharge", () => {
-  assert.equal(expectedPrice(25, 2.7), "67.50");
-  assert.equal(expectedPrice(26, 4.2), "109.20");
-  assert.equal(expectedPrice(40, 2.7), "108.00");
-  assert.equal(expectedPrice(41, 2.7), "121.50"); // 45u
-  assert.equal(expectedPrice(137, 2.7), "378.00"); // 140u
-  assert.equal(expectedPrice(300, 4.2), "1260.00");
-  assert.equal(expectedPrice(301, 2.7), null);
+  assert.equal(expectedPrice(25, 2), "50.00");
+  assert.equal(expectedPrice(26, 3.5), "91.00");
+  assert.equal(expectedPrice(40, 2), "80.00");
+  assert.equal(expectedPrice(41, 2), "90.00"); // 45u
+  assert.equal(expectedPrice(137, 2), "280.00"); // 140u
+  assert.equal(expectedPrice(300, 3.5), "1050.00");
+  assert.equal(expectedPrice(301, 2), null);
   assert.equal(pricedUnits(137), 140);
 });
 
 test("a correct ladder produces no mismatches; a wrong price / missing tier is named", () => {
-  const live = [...observedFrom("Standard Shipping", 2.7), ...observedFrom("Express Shipping", 4.2), { name: "Request a quote", price: "0.00", minLb: 300.5, maxLb: null }];
+  const live = [...observedFrom("Standard Shipping", 2), ...observedFrom("Express Shipping", 3.5), { name: "Request a quote", price: "0.00", minLb: 300.5, maxLb: null }];
   assert.deepEqual(diffLadder("z", live, buildTiers()), []);
   assert.deepEqual(checkCarts("z", live, [25, 26, 40, 137, 300]), []);
   const bad = live.filter((r) => !(r.name === "Standard Shipping" && r.minLb === 24.5));
@@ -45,7 +46,7 @@ test("a correct ladder produces no mismatches; a wrong price / missing tier is n
   const d = diffLadder("z", bad, buildTiers()).map((m) => m.what);
   assert.equal(d.length, 2);
   assert.match(d[0], /Standard Shipping tier 24.5-25.4 .* MISSING/);
-  assert.match(d[1], /Express Shipping tier 40.5-45.4 lb price \$1.00, expected \$189.00/);
+  assert.match(d[1], /Express Shipping tier 40.5-45.4 lb price \$1.00, expected \$157.50/);
   assert.equal(checkCarts("z", bad, [25]).length, 1);
 });
 
@@ -76,13 +77,26 @@ test("planRequests: <=5 zones and <=MAX methods per request, deletes sent once, 
   const big = planRequests([work("big", MAX_METHODS_PER_REQUEST * 2 + 1)]);
   assert.equal(big.length, 3);
   assert.equal(big.flat().flatMap((w) => w.deleteIds).length, 1);
+  // in-place updates count toward the per-request cap too
+  const upd = planRequests([{ ...work("u", 0), update: Array.from({ length: MAX_METHODS_PER_REQUEST + 1 }, (_, i) => ({ id: `u${i}` }) as never) }]);
+  assert.equal(upd.length, 2);
+  assert.equal(upd.flat().reduce((n, w) => n + (w.update?.length ?? 0), 0), MAX_METHODS_PER_REQUEST + 1);
 });
 
 test("tierMethod payload: inclusive weight bounds in pounds, price at upper edge", () => {
-  const m = tierMethod("Standard Shipping", 2.7, exactTier(26), "USD");
-  assert.equal(m.rateDefinition.price.amount, "70.20");
+  const m = tierMethod("Standard Shipping", 2, exactTier(26), "USD", "About 20 days after it ships");
+  assert.equal(m.rateDefinition.price.amount, "52.00");
+  assert.equal(m.description, "About 20 days after it ships");
   assert.deepEqual(m.weightConditionsToCreate, [
     { operator: "GREATER_THAN_OR_EQUAL_TO", criteria: { value: 25.5, unit: "POUNDS" } },
     { operator: "LESS_THAN_OR_EQUAL_TO", criteria: { value: 26.4, unit: "POUNDS" } },
   ]);
+});
+
+test("a wrong or missing delivery description is reported per tier", () => {
+  const live = [...observedFrom("Standard Shipping", 2), ...observedFrom("Express Shipping", 3.5)];
+  live.find((r) => r.name === "Standard Shipping" && r.minLb === 24.5)!.description = "";
+  const d = diffLadder("z", live, buildTiers()).map((m) => m.what);
+  assert.equal(d.length, 1);
+  assert.match(d[0], /Standard Shipping tier 24.5-25.4 lb description "", expected "About 20 days after it ships"/);
 });

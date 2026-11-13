@@ -29,6 +29,7 @@ import {
   checkCarts,
   diffLadder,
   exactTier,
+  priceStr,
   r1,
   SERVICES,
   type Mismatch,
@@ -37,6 +38,7 @@ import {
   ensureOriginalBackup,
   fallbackFloorLb,
   isFallback,
+  methodBounds,
   logEvent,
   methodFromLive,
   observedRates,
@@ -49,6 +51,7 @@ import {
   type LiveProfile,
   type LiveZone,
   type MethodCreate,
+  type MethodUpdate,
   type ZoneWork,
 } from "@/lib/shipping-profile";
 
@@ -116,8 +119,35 @@ async function fullRun(execute: boolean) {
   for (const z of profile.zones) {
     const canary = z.methods.filter((m) => isCanary(m.name));
     if (canary.length > 0) blockers.push(`zone ${z.name} still has ${canary.length} CANARY rates — run --canary cleanup via --rollback first`);
-    const replace = z.methods.filter((m) => m.kind === "rate" && ours(m.name));
-    const keep = z.methods.filter((m) => !replace.includes(m));
+    const existing = z.methods.filter((m) => m.kind === "rate" && ours(m.name));
+    // Match live Standard/Express rates to the desired ladder by (name, weight bounds): matches are
+    // updated in place (price + description; no gap at checkout, no rate-cap pressure), the rest
+    // created, and live rates outside the ladder deleted.
+    const unmatched = new Set(existing);
+    const create: MethodCreate[] = [];
+    const update: MethodUpdate[] = [];
+    let unchanged = 0;
+    for (const s of SERVICES) {
+      for (const t of tiers) {
+        const want = priceStr(t.units, s.perUnit);
+        const m = existing.find((e) => unmatched.has(e) && e.name.toLowerCase() === s.name.toLowerCase() && methodBounds(e).minLb === t.minLb && methodBounds(e).maxLb === t.maxLb);
+        if (!m) {
+          create.push(tierMethod(s.name, s.perUnit, t, profile.currency, s.description));
+          continue;
+        }
+        unmatched.delete(m);
+        if (Number(m.price).toFixed(2) === want && (m.description ?? "") === s.description && m.rateId) {
+          unchanged++;
+        } else if (m.rateId) {
+          update.push({ id: m.id, description: s.description, rateDefinition: { id: m.rateId, price: { amount: want, currencyCode: profile.currency } } });
+        } else {
+          unmatched.add(m);
+          create.push(tierMethod(s.name, s.perUnit, t, profile.currency, s.description));
+        }
+      }
+    }
+    const replace = [...unmatched];
+    const keep = z.methods.filter((m) => !existing.includes(m));
     const fb = keep.filter(isFallback);
     const fbDelete: string[] = [];
     const fbCreate: MethodCreate[] = [];
@@ -136,12 +166,13 @@ async function fullRun(execute: boolean) {
       }
     }
     const others = keep.filter((m) => !isFallback(m));
-    console.log(`  ${describeZone(z)}: delete ${replace.length} old Standard/Express, create ${tiers.length * SERVICES.length}, keep fallback x${fb.length}${others.length ? `, ${others.length} other rates untouched (${others.map((o) => o.name).join(", ")})` : ""}${fb.length === 0 ? "  [no fallback rate in this zone]" : ""}`);
+    console.log(`  ${describeZone(z)}: Standard/Express: ${unchanged} already correct, update ${update.length}, create ${create.length}, delete ${replace.length}; keep fallback x${fb.length}${others.length ? `, ${others.length} other rates untouched (${others.map((o) => o.name).join(", ")})` : ""}${fb.length === 0 ? "  [no fallback rate in this zone]" : ""}`);
     work.push({
       zoneId: z.id,
       zoneName: z.name,
       deleteIds: [...replace.map((m) => m.id), ...fbDelete],
-      create: [...SERVICES.flatMap((s) => tiers.map((t) => tierMethod(s.name, s.perUnit, t, profile.currency))), ...fbCreate],
+      create: [...create, ...fbCreate],
+      update,
     });
   }
   const overlapOnly = blockers.every((b) => b.includes("floor is"));
