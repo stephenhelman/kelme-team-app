@@ -91,7 +91,7 @@ function categoryIdsOf(detail: RawProductDetail): string {
 // summary/hero images (bare {styleCode}.jpg, sentinel {styleCode}_9999.jpg)
 // without guessing — they simply never match a known color. No HEAD-check;
 // use whatever allpic contains, preferring the _01 sequence per color.
-function buildColorImageMap(allpic: string[] | undefined, styleCode: string, knownCodes: Set<string>): Map<string, string> {
+export function buildColorImageMap(allpic: string[] | undefined, styleCode: string, knownCodes: Set<string>): Map<string, string> {
   const best = new Map<string, { seq: string; url: string }>();
   for (const url of allpic ?? []) {
     const filename = url.split("/").pop() ?? "";
