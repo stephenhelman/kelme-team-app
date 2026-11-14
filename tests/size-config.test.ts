@@ -38,12 +38,9 @@ test("adult: 2XS aliases to XXS; XXS..3XL map", () => {
   for (const s of ["XXS", "XS", "S", "M", "L", "XL", "2XL", "3XL"]) assert.equal(ok(s), s);
 });
 
-test("pass 2: adult 4XL-7XL are sold by default; 8XL-11XL stay policy-excluded", () => {
-  for (const s of ["4XL", "5XL", "6XL", "7XL"]) assert.equal(classifySize(s, false).status, "ok", s);
-  for (const s of ["8XL", "9XL", "10XL", "11XL"]) assert.equal(classifySize(s, false).status, "excluded", s);
-  assert.deepEqual(adultExcluded(), ["8XL", "9XL", "10XL", "11XL"]);
-  // the pass-1 policy is still expressible explicitly
-  assert.equal(classifySize("4XL", false, { extended: [] }).status, "excluded");
+test("adult 4XL-11XL are policy-excluded by default (decision 2026-11-14: not carried)", () => {
+  for (const s of ["4XL", "5XL", "6XL", "7XL", "8XL", "9XL", "10XL", "11XL"]) assert.equal(classifySize(s, false).status, "excluded", s);
+  assert.deepEqual(adultExcluded(), ["4XL", "5XL", "6XL", "7XL", "8XL", "9XL", "10XL", "11XL"]);
 });
 
 test("ADULT_EXTENDED lifts exclusion for just those sizes (pass 2)", () => {
@@ -65,10 +62,10 @@ test("ball sizes and One Size are unchanged", () => {
   assert.equal(ok(""), "One Size");
 });
 
-test("display order: 2 before 4, XXS before XS, 3XL..7XL, One Size last; old 14/16/2XS gone", () => {
+test("display order: 2 before 4, XXS before XS, One Size last; old 14/16/2XS gone", () => {
   assert.deepEqual(KIDS_LABELS, ["2", "4", "6", "8", "10", "12"]);
-  assert.deepEqual(CANONICAL_SIZE_ORDER, ["2", "4", "6", "8", "10", "12", "XXS", "XS", "S", "M", "L", "XL", "2XL", "3XL", "4XL", "5XL", "6XL", "7XL", "One Size"]);
-  assert.deepEqual(buildSizeOrder([]).slice(-2), ["3XL", "One Size"]);
+  assert.deepEqual(CANONICAL_SIZE_ORDER, ["2", "4", "6", "8", "10", "12", "XXS", "XS", "S", "M", "L", "XL", "2XL", "3XL", "One Size"]);
+  assert.deepEqual(buildSizeOrder(["4XL", "5XL"]).slice(-3), ["4XL", "5XL", "One Size"]);
 });
 
 test("vendor display: kids sizes show the height, others untouched", () => {
