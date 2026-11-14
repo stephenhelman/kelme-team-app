@@ -10,7 +10,7 @@
  */
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { executeDraft, PartialDraftError } from "@/lib/shopify-draft";
+import { executeDraft, PartialDraftError, type VerifyReport } from "@/lib/shopify-draft";
 import type { CategoryMap } from "@/lib/draft-rules";
 import type { DraftEmailItem } from "@/lib/draft-email";
 
@@ -30,6 +30,7 @@ export interface JobOutcome {
   message?: string;
   productGid?: string;
   emailItem?: DraftEmailItem;
+  verify?: VerifyReport;
 }
 
 export async function createDraftTracked(styleCode: string, opts: { runId: number; categoryMap?: CategoryMap; resume?: boolean }): Promise<JobOutcome> {
@@ -59,10 +60,10 @@ export async function createDraftTracked(styleCode: string, opts: { runId: numbe
     if (r.verify.problems.length > 0) {
       const msg = `created ${r.productId} but verification found: ${r.verify.problems.slice(0, 5).join("; ")}`;
       await prisma.draftJob.update({ where: { styleCode }, data: { status: "FAILED", productGid: r.productId, error: msg.slice(0, 1000), summary: r.emailItem as unknown as Prisma.InputJsonValue } });
-      return { styleCode, status: "failed", message: msg, productGid: r.productId, emailItem: r.emailItem };
+      return { styleCode, status: "failed", message: msg, productGid: r.productId, emailItem: r.emailItem, verify: r.verify };
     }
     await prisma.draftJob.update({ where: { styleCode }, data: { status: "CREATED", productGid: r.productId, error: null, summary: r.emailItem as unknown as Prisma.InputJsonValue } });
-    return { styleCode, status: "created", productGid: r.productId, emailItem: r.emailItem };
+    return { styleCode, status: "created", productGid: r.productId, emailItem: r.emailItem, verify: r.verify };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (err instanceof PartialDraftError) {
