@@ -621,6 +621,9 @@ export function buildMutationInput(
   // Only the weight canary (scripts/shipping-canary-weight.ts) turns this off,
   // to test whether a productSet that omits weight preserves it.
   includeWeight = true,
+  // false = plain (unlinked) Color/Size values. Only for a product with NO category: Shopify refuses to link
+  // an option to a metafield on a product without a category ("At least one value ... is invalid").
+  linked = true,
 ) {
   const productOptions = [{ name: "Color", position: 1, values: colorValues.map((v) => ({ name: v.name })) }];
   if (sizeOptionName !== null) {
@@ -639,10 +642,10 @@ export function buildMutationInput(
         : {}),
       optionValues:
         sizeOptionName === null
-          ? [{ optionName: "Color", name: colorOptionValue(t.colorName, t.colorCode), linkedMetafieldValue: t.colorGid }]
+          ? [{ optionName: "Color", name: colorOptionValue(t.colorName, t.colorCode), ...(linked ? { linkedMetafieldValue: t.colorGid } : {}) }]
           : [
-              { optionName: "Color", name: colorOptionValue(t.colorName, t.colorCode), linkedMetafieldValue: t.colorGid },
-              { optionName: sizeOptionName, name: t.size, linkedMetafieldValue: t.sizeGid },
+              { optionName: "Color", name: colorOptionValue(t.colorName, t.colorCode), ...(linked ? { linkedMetafieldValue: t.colorGid } : {}) },
+              { optionName: sizeOptionName, name: t.size, ...(linked ? { linkedMetafieldValue: t.sizeGid } : {}) },
             ],
     })),
   };
@@ -656,10 +659,15 @@ export async function setShopifyProductStructure(
   sizeOptionName: string | null = "Size",
   priceFor?: (t: TargetVariant) => string,
   includeWeight = true,
+  linked = true,
 ): Promise<number> {
-  const resolved = await ensureOptionValuesExist(shopifyProductId, colorValues, sizeValues, sizeOptionName);
+  // Unlinked (no-category product): the plain Color/Size options and values already exist from productCreate,
+  // so there is nothing to link or convert — go straight to the variant grid.
+  const resolved = linked
+    ? await ensureOptionValuesExist(shopifyProductId, colorValues, sizeValues, sizeOptionName)
+    : { colorOptionName: "Color", sizeOptionName };
 
-  const input = buildMutationInput(shopifyProductId, colorValues, sizeValues, target, resolved.sizeOptionName, priceFor, includeWeight);
+  const input = buildMutationInput(shopifyProductId, colorValues, sizeValues, target, resolved.sizeOptionName, priceFor, includeWeight, linked);
   const identifier = productSetIdentifier(shopifyProductId);
 
   console.log(

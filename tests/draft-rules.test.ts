@@ -92,3 +92,20 @@ test("DraftJob lock: created is skipped, interrupted/failed needs a human, block
   assert.equal(decideJob({ status: "BLOCKED" }, true), "resume"); // a resume that was wrongly blocked can be retried
   assert.equal(decideJob(null, true), "resume");
 });
+
+import { buildMutationInput } from "../lib/shopify-reconcile";
+
+test("no category: options are created plain (no linked values) and a missing color/size value does not block", () => {
+  const e = evaluateDraft(base({ subCategory: "Sports Vest", colorsMissingGid: ["214"] }), none);
+  assert.equal(e.category, null);
+  assert.deepEqual(e.blockers, []);
+  const withCat = evaluateDraft(base({ colorsMissingGid: ["214"] }), none);
+  assert.match(withCat.blockers[0], /no Shopify color value/);
+});
+
+test("buildMutationInput: linked by default, plain values when linked=false", () => {
+  const t = [{ styleCode: "S", colorCode: "100", colorName: "White", colorGid: "gid://c", size: "M", sizeGid: "gid://s" }];
+  const opt = (linked?: boolean) => (buildMutationInput(1, [{ name: "White - 100", gid: "gid://c" }], [{ name: "M", gid: "gid://s" }], t, "Size", () => "10.00", true, linked) as { variants: { optionValues: Record<string, unknown>[] }[] }).variants[0].optionValues;
+  assert.deepEqual(opt().map((o) => o.linkedMetafieldValue), ["gid://c", "gid://s"]);
+  assert.deepEqual(opt(false).map((o) => "linkedMetafieldValue" in o), [false, false]);
+});

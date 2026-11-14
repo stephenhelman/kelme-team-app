@@ -568,7 +568,8 @@ export async function verifyDraft(productGid: string, plan: DraftPlan): Promise<
   if (plan.category && p.category?.fullName !== plan.category.label) problems.push(`category is "${p.category?.fullName}", expected "${plan.category.label}"`);
   const expectedLinked: Record<string, string> = { Color: "color-pattern", Size: "size", "Ball size": "ball-size" };
   for (const o of p.options) {
-    if (expectedLinked[o.name] && o.linkedMetafield?.key !== expectedLinked[o.name]) problems.push(`option ${o.name} not linked to ${expectedLinked[o.name]}`);
+    // No category => options are intentionally plain (needs-category); otherwise they must be linked.
+    if (plan.category && expectedLinked[o.name] && o.linkedMetafield?.key !== expectedLinked[o.name]) problems.push(`option ${o.name} not linked to ${expectedLinked[o.name]}`);
   }
   if (variants.length !== plan.variants.length) problems.push(`variant count ${variants.length} != expected ${plan.variants.length}`);
   for (const v of perVariant) {
@@ -665,7 +666,9 @@ export async function executeDraft(styleCode: string, opts: { resume?: boolean; 
   try {
   
     // 3. Options + variants through the existing GID-linked path.
-    await setShopifyProductStructure(productNumericId, plan.colorValues, plan.sizeValues, plan.target, plan.sizeOptionName, () => plan.price);
+    // A product with no category cannot have linked options (Shopify rejects it): it gets plain Color/Size values,
+    // and the needs-category tag tells the vendor to set a category.
+    await setShopifyProductStructure(productNumericId, plan.colorValues, plan.sizeValues, plan.target, plan.sizeOptionName, () => plan.price, true, plan.category !== null);
     await logDraftEvent({ styleCode, step: "structure", productGid, variants: plan.target.length });
     await sleep(CALL_PACING_MS);
     if (plan.sizeOptionName !== null) {

@@ -94,8 +94,10 @@ export function evaluateDraft(src: DraftSource, liveCategories: CategoryMap): Dr
   const blockers: string[] = [];
   if (src.variants.length === 0) blockers.push("nothing to create — no variant in a carried size");
   if (src.unknownSizes.length > 0) blockers.push(`unknown Kelme size label(s): ${[...new Set(src.unknownSizes)].join(", ")}`);
-  if (src.colorsMissingGid.length > 0) blockers.push(`color(s) with no Shopify color value to link: ${src.colorsMissingGid.join(", ")}`);
-  if (src.sizesMissingGid.length > 0) blockers.push(`size(s) with no Shopify size value to link: ${src.sizesMissingGid.join(", ")}`);
+  // Linking only happens on a product WITH a category (Shopify refuses linked options without one), so a missing
+  // color/size value only blocks categorized products; a no-category draft is created with plain options.
+  if (category && src.colorsMissingGid.length > 0) blockers.push(`color(s) with no Shopify color value to link: ${src.colorsMissingGid.join(", ")}`);
+  if (category && src.sizesMissingGid.length > 0) blockers.push(`size(s) with no Shopify size value to link: ${src.sizesMissingGid.join(", ")}`);
   if (src.variants.length > VARIANT_LIMIT) blockers.push(`needs the >${VARIANT_LIMIT}-variant split (${src.variants.length} variants) — not automated`);
 
   const isEquipment = Boolean(src.subCategory && EQUIPMENT_SUBCATEGORIES.has(src.subCategory.trim().toLowerCase()));
