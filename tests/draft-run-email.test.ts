@@ -70,7 +70,7 @@ test("auto drafts: one attempt per day, success or failure (no retry loop)", () 
   assert.equal(dueForRun(new Date("2026-11-14T10:00:00Z"), now), true);
 });
 
-const report = (over: Partial<RunReport> = {}): RunReport => ({ runId: 7, source: "auto", pending: 0, created: [], blocked: [], failed: [], skipped: [], overCap: [], needsHuman: [], stoppedReason: null, ...over });
+const report = (over: Partial<RunReport> = {}): RunReport => ({ runId: 7, source: "auto", pending: 0, created: [], blocked: [], failed: [], skipped: [], overCap: [], needsHuman: [], stoppedReason: null, missingColors: [], ...over });
 const bad = (r: RunReport) => alertsFor(r, 15).filter((a) => a.isBad).map((a) => a.kind);
 
 test("auto drafts alerts: quiet run raises nothing; over-cap, failure, blocked and stuck each raise their own", () => {

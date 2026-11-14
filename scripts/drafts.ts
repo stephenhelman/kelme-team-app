@@ -63,6 +63,7 @@ import { fetchFavorites, loadSelection, planDrafts, previewEmailItem, runDrafts 
 import { fetchLiveCategoryMap } from "@/lib/draft-category";
 import { createDraftTracked, runEmailItems } from "@/lib/draft-jobs";
 import { renderNewDraftsEmail, sendNewDraftsEmail } from "@/lib/draft-email";
+import { COLOR_SEED_MAP, suggestMapping } from "@/lib/color-seed";
 
 function printPlan(plan: DraftPlan): void {
   console.log(`styleCode      ${plan.styleCode} (pdtid ${plan.pdtid})`);
@@ -198,6 +199,23 @@ async function main(): Promise<void> {
       console.log(`         ${e.title}`);
       console.log(`         tags: ${e.tags.join(", ")} | category: ${e.category ? `${e.category.label.split(" > ").slice(-2).join(" > ")} (${e.categorySource})` : "NONE"} | to-do: ${e.todos.map((t) => t).join(", ")}`);
       if (blocked) console.log(`         BLOCKERS: ${e.blockers.join("; ")}`);
+    }
+    // Colors with no Shopify value (their styles stay blocked until `npm run colors -- seed --execute`).
+    const unseeded = new Map<string, { name: string; styles: Set<string> }>();
+    for (const p of planned) {
+      if (p.error) continue;
+      for (const code of p.source.colorsMissingGid) {
+        const e = unseeded.get(code) ?? { name: p.source.variants.find((v) => v.colorCode === code)?.colorName ?? "?", styles: new Set<string>() };
+        e.styles.add(p.favorite.no);
+        unseeded.set(code, e);
+      }
+    }
+    if (unseeded.size > 0) {
+      console.log(`\nUNSEEDED COLORS (${unseeded.size}) — blocking ${new Set([...unseeded.values()].flatMap((e) => [...e.styles])).size} style(s):`);
+      for (const [code, e] of [...unseeded].sort()) {
+        const approved = COLOR_SEED_MAP[code];
+        console.log(`  ${code} ${e.name}: ${approved ? "approved mapping exists — run `npm run colors -- seed --execute`" : `NOT approved; suggested ${suggestMapping(e.name).taxonomyColors.join(" + ") || "(none)"} — add to COLOR_SEED_MAP first`}  [${[...e.styles].join(", ")}]`);
+      }
     }
     const ok = planned.filter((p) => !p.error && p.evaluation.blockers.length === 0);
     console.log(`\n===== dry-run summary =====\n${ok.length} would be created (${variants} variants, ${qty} Kelme units); ${blockedN} blocked; ${offVariants} variants left off (policy-excluded sizes)`);

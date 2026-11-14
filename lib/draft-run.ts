@@ -22,6 +22,7 @@ import { evaluateDraft, type CategoryMap, type DraftEvaluation, type DraftSource
 import { fetchLiveCategoryMap } from "@/lib/draft-category";
 import { createDraftTracked, type JobOutcome } from "@/lib/draft-jobs";
 import type { DraftEmailItem } from "@/lib/draft-email";
+import { describeMissingColors, missingColorCodes, type MissingColor } from "@/lib/color-seed";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function retry<T>(fn: () => Promise<T>): Promise<T> {
@@ -206,6 +207,7 @@ export interface RunReport {
   overCap: string[];
   needsHuman: { styleCode: string; status: string }[];
   stoppedReason: string | null;
+  missingColors: MissingColor[]; // Kelme colors with no Shopify value: their styles stay blocked until seeded
 }
 
 async function ensureDbProduct(f: Favorite): Promise<void> {
@@ -223,7 +225,7 @@ export async function runDrafts(opts: { source: "manual" | "auto"; cap?: number;
   const counts = { pending: sel.pending.length + sel.overCap.length, overCap: sel.overCap.length };
   // The daily job creates the run row BEFORE any network call (it doubles as the "attempted today" marker).
   const run = opts.runId ? await prisma.draftRun.update({ where: { id: opts.runId }, data: counts }) : await prisma.draftRun.create({ data: { source: opts.source, ...counts } });
-  const report: RunReport = { runId: run.id, source: opts.source, pending: sel.pending.length + sel.overCap.length, created: [], blocked: [], failed: [], skipped: [], overCap: sel.overCap.map((f) => f.no), needsHuman: sel.needsHuman, stoppedReason: null };
+  const report: RunReport = { runId: run.id, source: opts.source, pending: sel.pending.length + sel.overCap.length, created: [], blocked: [], failed: [], skipped: [], overCap: sel.overCap.map((f) => f.no), needsHuman: sel.needsHuman, stoppedReason: null, missingColors: [] };
   log(`run ${run.id} (${opts.source}): ${favs.length} favorites; not on Shopify ${report.pending}; creating ${sel.pending.length}; over cap ${sel.overCap.length}; needs a person ${sel.needsHuman.length}`);
 
   const categoryMap = await fetchLiveCategoryMap();
@@ -249,6 +251,7 @@ export async function runDrafts(opts: { source: "manual" | "auto"; cap?: number;
     await sleep(1000);
   }
 
+  report.missingColors = await describeMissingColors([...report.blocked, ...report.failed].flatMap((o) => missingColorCodes(o.message ?? ""))).catch(() => []);
   await prisma.draftRun.update({
     where: { id: run.id },
     data: { finishedAt: new Date(), created: report.created.length, blocked: report.blocked.length, failed: report.failed.length, stoppedReason: report.stoppedReason },

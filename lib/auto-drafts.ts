@@ -18,6 +18,7 @@ import { runEmailItems } from "@/lib/draft-jobs";
 import { sendNewDraftsEmail } from "@/lib/draft-email";
 import { reportSyncAlert, sendAdminAlert } from "@/lib/admin-notify";
 import { shopDomain } from "@/lib/shopify";
+import { missingColorsAlertBody } from "@/lib/color-seed";
 
 export const DEFAULT_MAX_DRAFTS_PER_RUN = 15;
 const MIN_GAP_MS = 23 * 60 * 60 * 1000;
@@ -58,6 +59,13 @@ export function alertsFor(report: RunReport, cap: number): PlannedAlert[] {
       subject: `Auto drafts: ${report.overCap.length} more favorite(s) waiting (cap ${cap} per run)`,
       body: `Run #${report.runId} created up to the cap of ${cap}. ${report.overCap.length} favorite(s) are still waiting and will be picked up by the next daily run:\n\n${report.overCap.join(", ")}\n\nRaise MAX_DRAFTS_PER_RUN, or run \`npm run drafts -- create --all --execute\` yourself.`,
       persistWindowMs: 24 * 60 * 60 * 1000,
+    },
+    {
+      kind: "auto_drafts_new_colors",
+      isBad: report.missingColors.length > 0,
+      subject: `Auto drafts: ${report.missingColors.length} new Kelme color(s) need a Shopify color value`,
+      body: missingColorsAlertBody(report.missingColors),
+      persistWindowMs: 3 * 24 * 60 * 60 * 1000,
     },
     {
       kind: "auto_drafts_blocked",
