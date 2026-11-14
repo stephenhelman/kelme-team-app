@@ -128,7 +128,7 @@ const GENDER_TO_AUDIENCE: Record<string, Audience> = {
 
 // Sub-category values confirmed (via the full catalog) to be equipment/
 // accessories with no real audience, regardless of what Gender says.
-const EQUIPMENT_SUBCATEGORIES = new Set([
+export const EQUIPMENT_SUBCATEGORIES = new Set([
   "football ball",
   "training device",
   "bagpack",

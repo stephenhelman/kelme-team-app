@@ -40,17 +40,15 @@ import {
   fetchCurrentInventoryState,
   setQuantitiesWithBackoff,
 } from "@/lib/shopify-inventory-push";
-import { classifyAudience } from "@/lib/shopify-tags";
 import { titleHasStyleCode } from "@/lib/style-match";
-import { recaptureProduct, fetchShopifyTitles, familyConflictsFor } from "@/lib/draft-preflight";
+import { recaptureProduct, fetchShopifyTitles } from "@/lib/draft-preflight";
+import { checkImageExists } from "@/lib/kelme";
+import { evaluateDraft, leftOffFromNotes, type CategoryMap, type DraftEvaluation, type DraftTodo } from "@/lib/draft-rules";
+import { fetchLiveCategoryMap } from "@/lib/draft-category";
+import type { DraftEmailItem } from "@/lib/draft-email";
 import {
   DRAFT_VENDOR,
   buildDescriptionHtml,
-  buildTags,
-  buildTitle,
-  categoryFor,
-  evaluatePreflight,
-  placeholderPrice,
   planImage,
   type CategoryRule,
   type ImagePlanEntry,
@@ -119,9 +117,24 @@ export interface DraftPlan {
   existingOnShopify: { id: string; title: string; status: string }[];
   blockers: string[];
   qtyCapturedAt: Date | null;
+  todos: DraftTodo[];
+  categorySource: DraftEvaluation["categorySource"];
+  sizesCreated: string[];
+  sizesLeftOff: string[];
+  colors: { code: string; name: string }[];
+  unreachableColors: string[];
 }
 
-export async function planDraft(styleCode: string): Promise<DraftPlan> {
+export interface PlanDraftOptions {
+  /** Categories used by live products, per Kelme sub-category (fetched once per run). */
+  categoryMap?: CategoryMap;
+  /** Capture warnings about policy-excluded sizes (what was left off). */
+  excludedNotes?: string[];
+  /** HEAD-check each color image; unreachable ones are left off and the product is tagged needs-images. */
+  checkImages?: boolean;
+}
+
+export async function planDraft(styleCode: string, opts: PlanDraftOptions = {}): Promise<DraftPlan> {
   const product = await prisma.product.findFirst({
     where: { styleCode },
     include: { variants: { orderBy: [{ colorCode: "asc" }, { shopifySize: "asc" }] } },
@@ -138,53 +151,51 @@ export async function planDraft(styleCode: string): Promise<DraftPlan> {
   };
   const sizeValues = [...unorderedSizes].sort((a, b) => rank(a.name) - rank(b.name));
 
-  const [titles, allProducts] = await Promise.all([fetchShopifyTitles(), prisma.product.findMany({ select: { styleCode: true } })]);
+  const [titles, categoryMap] = await Promise.all([fetchShopifyTitles(), opts.categoryMap ? Promise.resolve(opts.categoryMap) : fetchLiveCategoryMap()]);
   const existingOnShopify = titles.filter((t) => titleHasStyleCode(t.title, styleCode));
 
-  const audience = classifyAudience(product.name, product.gender, product.subCategory);
-  const category = categoryFor(product.subCategory);
-  const price = placeholderPrice(product.kelmeCatalogPrice);
-
   const imagesByColor = new Map<string, ImagePlanEntry>();
-  const colorsWithoutImage: string[] = [];
+  const unreachableColors: string[] = [];
   for (const colorCode of [...new Set(product.variants.map((v) => v.colorCode))]) {
     const withImage = product.variants.find((v) => v.colorCode === colorCode && v.imageUrl);
     const entry = planImage(styleCode, colorCode, withImage?.imageUrl ?? null);
+    if (entry && opts.checkImages && !(await checkImageExists(entry.sourceUrl))) {
+      unreachableColors.push(colorCode); // left off; the product gets needs-images
+      continue;
+    }
     if (entry) imagesByColor.set(colorCode, entry);
-    else colorsWithoutImage.push(colorCode);
   }
+  const colorsWithoutImage = [...new Set(product.variants.map((v) => v.colorCode))].filter((c) => !imagesByColor.has(c));
 
-  // Same checks the pre-flight applies, re-run on the CURRENT DB state so a
-  // product can't be drafted on stale pre-flight output.
-  const pre = evaluatePreflight({
-    styleCode,
-    name: product.name,
-    gender: product.gender,
-    subCategory: product.subCategory,
-    kelmeCatalogPrice: product.kelmeCatalogPrice,
-    mainpic: product.mainpic,
-    variants: product.variants,
-    droppedSizeNotes: [],
-    colorsMissingGid: [...new Set(dbTarget.target.filter((t) => !t.colorGid).map((t) => t.colorCode))],
-    sizesMissingGid:
-      dbTarget.sizeOptionName === null ? [] : [...new Set(dbTarget.target.filter((t) => !t.sizeGid).map((t) => t.size))],
-    familyConflicts: familyConflictsFor(styleCode, allProducts.map((p) => p.styleCode), []),
-    unreachableImages: [],
-  });
-  const blockers = [...pre.flags];
+  const ev = evaluateDraft(
+    {
+      styleCode,
+      name: product.name,
+      gender: product.gender,
+      subCategory: product.subCategory,
+      kelmeCatalogPrice: product.kelmeCatalogPrice,
+      variants: product.variants.map((v) => ({ colorCode: v.colorCode, colorName: v.colorName, size: v.shopifySize, qty: v.qty, imageUrl: imagesByColor.has(v.colorCode) ? v.imageUrl : null })),
+      leftOff: leftOffFromNotes(opts.excludedNotes ?? []),
+      unknownSizes: [], // unknown labels are caught at capture (dropNotes) and stop executeDraft
+      colorsMissingGid: [...new Set(dbTarget.target.filter((t) => !t.colorGid).map((t) => t.colorCode))],
+      sizesMissingGid: dbTarget.sizeOptionName === null ? [] : [...new Set(dbTarget.target.filter((t) => !t.sizeGid).map((t) => t.size))],
+    },
+    categoryMap,
+  );
+  const blockers = [...ev.blockers];
   if (product.onShopify) blockers.push("DB already has onShopify=true");
 
   return {
     styleCode,
     pdtid: product.pdtid,
     productDbId: product.id,
-    title: buildTitle(product.name, audience, styleCode),
+    title: ev.title,
     vendor: DRAFT_VENDOR,
     status: "DRAFT",
-    tags: buildTags(audience),
-    category,
+    tags: ev.tags,
+    category: ev.category,
     descriptionHtml: buildDescriptionHtml(product),
-    price,
+    price: ev.price,
     priceSource: product.kelmeCatalogPrice && product.kelmeCatalogPrice > 0 ? "kelmeCatalogPrice" : "zero (no Kelme catalog price)",
     sizeOptionName: dbTarget.sizeOptionName,
     colorValues,
@@ -203,6 +214,12 @@ export async function planDraft(styleCode: string): Promise<DraftPlan> {
     existingOnShopify,
     blockers,
     qtyCapturedAt: product.syncedAt,
+    todos: ev.todos,
+    categorySource: ev.categorySource,
+    sizesCreated: ev.sizesCreated,
+    sizesLeftOff: ev.sizesLeftOff,
+    colors: ev.colors,
+    unreachableColors,
   };
 }
 
@@ -488,7 +505,7 @@ export interface VerifyReport {
   imagesAttached: number;
   expectedImages: number;
   variantsWithMedia: number;
-  perVariant: { sku: string; price: string; tracked: boolean; onHand: number | null; expectedQty: number; hasMedia: boolean; weightLb: number | null; requiresShipping: boolean | null }[];
+  perVariant: { colorCode: string; sku: string; price: string; tracked: boolean; onHand: number | null; expectedQty: number; hasMedia: boolean; weightLb: number | null; requiresShipping: boolean | null }[];
   problems: string[];
 }
 
@@ -524,9 +541,11 @@ export async function verifyDraft(productGid: string, plan: DraftPlan): Promise<
   const state = await fetchCurrentInventoryState(variants.flatMap((v) => (v.inventoryItem ? [v.inventoryItem.id] : [])));
   const qtyByKey = new Map(plan.variants.map((v) => [`${v.colorCode}::${v.size}`, v.qty]));
 
+  const colorsWithPlannedImage = new Set(plan.images.map((i) => i.colorCode));
   const perVariant = variants.map((v) => {
     const st = v.inventoryItem ? state.get(v.inventoryItem.id) : undefined;
     return {
+      colorCode: variantKey(v).split("::")[0],
       sku: v.sku ?? "(none)",
       price: v.price,
       tracked: Boolean(v.inventoryItem?.tracked),
@@ -556,7 +575,8 @@ export async function verifyDraft(productGid: string, plan: DraftPlan): Promise<
     if (v.price !== plan.price) problems.push(`${v.sku}: price ${v.price} != ${plan.price}`);
     if (v.weightLb !== CORE_WEIGHT_LB) problems.push(`${v.sku}: weight ${v.weightLb ?? "none"} lb != ${CORE_WEIGHT_LB} lb`);
     if (v.requiresShipping !== CORE_REQUIRES_SHIPPING) problems.push(`${v.sku}: requiresShipping ${v.requiresShipping} != ${CORE_REQUIRES_SHIPPING}`);
-    if (!v.hasMedia && plan.images.length > 0) problems.push(`${v.sku}: no image attached`);
+    // A color with no image is allowed (the draft is tagged needs-images); a color that HAD one must show it.
+    if (!v.hasMedia && colorsWithPlannedImage.has(v.colorCode)) problems.push(`${v.sku}: no image attached`);
   }
 
   return {
@@ -583,9 +603,18 @@ export interface ExecuteDraftResult {
   mediaUploaded: number;
   verify: VerifyReport;
   summary: AddedProduct;
+  emailItem: DraftEmailItem;
 }
 
-export async function executeDraft(styleCode: string, opts: { resume?: boolean } = {}): Promise<ExecuteDraftResult> {
+/** Thrown after productCreate succeeded: a partial draft exists and the style needs a human `--resume`. */
+export class PartialDraftError extends Error {
+  constructor(message: string, readonly productGid: string) {
+    super(message);
+    this.name = "PartialDraftError";
+  }
+}
+
+export async function executeDraft(styleCode: string, opts: { resume?: boolean; categoryMap?: CategoryMap } = {}): Promise<ExecuteDraftResult> {
   const resume = opts.resume === true;
 
   // 0. Guards that need no Shopify write.
@@ -601,9 +630,8 @@ export async function executeDraft(styleCode: string, opts: { resume?: boolean }
   if (recap.error) throw new Error(`Kelme re-capture failed: ${recap.error}`);
   if (recap.dropNotes.length > 0) throw new Error(`Cannot execute — Kelme re-capture dropped sizes, not a clean product: ${recap.dropNotes.join("; ")}`);
 
-  const plan = await planDraft(styleCode);
+  const plan = await planDraft(styleCode, { categoryMap: opts.categoryMap, excludedNotes: recap.excludedNotes, checkImages: true });
   if (plan.blockers.length > 0) throw new Error(`Cannot execute — ${plan.blockers.join("; ")}`);
-  if (!plan.category) throw new Error("Cannot execute — no category mapping");
 
   // 2. productCreate (or adopt the partial draft on --resume).
   let productGid: string;
@@ -631,59 +659,76 @@ export async function executeDraft(styleCode: string, opts: { resume?: boolean }
     await sleep(CALL_PACING_MS);
   }
   const productNumericId = numericId(productGid);
-
-  // 3. Options + variants through the existing GID-linked path.
-  await setShopifyProductStructure(productNumericId, plan.colorValues, plan.sizeValues, plan.target, plan.sizeOptionName, () => plan.price);
-  await logDraftEvent({ styleCode, step: "structure", productGid, variants: plan.target.length });
-  await sleep(CALL_PACING_MS);
-  if (plan.sizeOptionName !== null) {
-    await executeSizeOrder(productNumericId);
+  try {
+  
+    // 3. Options + variants through the existing GID-linked path.
+    await setShopifyProductStructure(productNumericId, plan.colorValues, plan.sizeValues, plan.target, plan.sizeOptionName, () => plan.price);
+    await logDraftEvent({ styleCode, step: "structure", productGid, variants: plan.target.length });
     await sleep(CALL_PACING_MS);
+    if (plan.sizeOptionName !== null) {
+      await executeSizeOrder(productNumericId);
+      await sleep(CALL_PACING_MS);
+    }
+
+    // 4. Images (only when Kelme supplied some): upload + attach to the product, then one per color to variants.
+    let mediaUploaded = 0;
+    if (plan.images.length > 0) {
+      mediaUploaded = await ensureProductMedia(productGid, plan);
+      await waitForMediaReady(productGid, plan.images.length);
+      await executeMedia(productNumericId);
+    }
+    await logDraftEvent({ styleCode, step: "media", productGid, uploaded: mediaUploaded, images: plan.images.length });
+
+    // 5. Link-back: stamp variant + inventory-item ids in the DB.
+    const live = await fetchVariants(productGid);
+    const byKey = new Map(live.map((v) => [variantKey(v), v]));
+    const items: { inventoryItemGid: string; qty: number }[] = [];
+    for (const v of plan.variants) {
+      const lv = byKey.get(`${v.colorCode}::${v.size}`);
+      if (!lv || !lv.inventoryItem) throw new Error(`no Shopify variant/inventory item for ${v.sku} (${v.colorCode}::${v.size})`);
+      await prisma.variant.update({
+        where: { id: v.dbVariantId },
+        data: { shopifyVariantId: lv.id, shopifyInventoryItemId: lv.inventoryItem.id },
+      });
+      items.push({ inventoryItemGid: lv.inventoryItem.id, qty: v.qty });
+    }
+    await prisma.product.update({ where: { id: plan.productDbId }, data: { onShopify: true } });
+    await logDraftEvent({ styleCode, step: "linkback", productGid, variants: items.length });
+
+    // 6. Inventory level at the store location with the Kelme qty.
+    await ensureInventory(items);
+    await logDraftEvent({ styleCode, step: "inventory", productGid, items: items.length });
+
+    // 7. Re-read everything from Shopify.
+    const verify = await verifyDraft(productGid, plan);
+    await logDraftEvent({ styleCode, step: "verify", productGid, problems: verify.problems });
+    const summary: AddedProduct = {
+      title: plan.title,
+      styleCode: plan.styleCode,
+      shopifyProductId: productGid,
+      status: verify.status,
+      category: verify.category,
+      variantCount: verify.variantCount,
+      colorCount: plan.colorValues.length,
+      sizes: plan.sizeValues.map((v) => v.name),
+      imagesAttached: verify.imagesAttached,
+      totalQty: plan.variants.reduce((n, v) => n + v.qty, 0),
+      variantsInStock: plan.variants.filter((v) => v.qty > 0).length,
+      price: plan.price,
+      needsPricing: plan.tags.includes("needs-pricing"),
+    };
+    const emailItem: DraftEmailItem = {
+      title: plan.title,
+      styleCode: plan.styleCode,
+      shopifyProductId: productGid,
+      colors: plan.colors.map((c) => c.name),
+      sizes: plan.sizesCreated,
+      sizesNotOffered: plan.sizesLeftOff,
+      todos: plan.todos,
+    };
+    return { productId: productGid, createdNew, mediaUploaded, verify, summary, emailItem };
+  } catch (err) {
+    // Everything after productCreate is idempotent, so a failure here leaves a partial DRAFT that --resume can finish.
+    throw new PartialDraftError(err instanceof Error ? err.message : String(err), productGid);
   }
-
-  // 4. Images: upload + attach to the product, then one per color to variants.
-  const mediaUploaded = await ensureProductMedia(productGid, plan);
-  await waitForMediaReady(productGid, plan.images.length);
-  await executeMedia(productNumericId);
-  await logDraftEvent({ styleCode, step: "media", productGid, uploaded: mediaUploaded });
-
-  // 5. Link-back: stamp variant + inventory-item ids in the DB.
-  const live = await fetchVariants(productGid);
-  const byKey = new Map(live.map((v) => [variantKey(v), v]));
-  const items: { inventoryItemGid: string; qty: number }[] = [];
-  for (const v of plan.variants) {
-    const lv = byKey.get(`${v.colorCode}::${v.size}`);
-    if (!lv || !lv.inventoryItem) throw new Error(`no Shopify variant/inventory item for ${v.sku} (${v.colorCode}::${v.size})`);
-    await prisma.variant.update({
-      where: { id: v.dbVariantId },
-      data: { shopifyVariantId: lv.id, shopifyInventoryItemId: lv.inventoryItem.id },
-    });
-    items.push({ inventoryItemGid: lv.inventoryItem.id, qty: v.qty });
-  }
-  await prisma.product.update({ where: { id: plan.productDbId }, data: { onShopify: true } });
-  await logDraftEvent({ styleCode, step: "linkback", productGid, variants: items.length });
-
-  // 6. Inventory level at the store location with the Kelme qty.
-  await ensureInventory(items);
-  await logDraftEvent({ styleCode, step: "inventory", productGid, items: items.length });
-
-  // 7. Re-read everything from Shopify.
-  const verify = await verifyDraft(productGid, plan);
-  await logDraftEvent({ styleCode, step: "verify", productGid, problems: verify.problems });
-  const summary: AddedProduct = {
-    title: plan.title,
-    styleCode: plan.styleCode,
-    shopifyProductId: productGid,
-    status: verify.status,
-    category: verify.category,
-    variantCount: verify.variantCount,
-    colorCount: plan.colorValues.length,
-    sizes: plan.sizeValues.map((v) => v.name),
-    imagesAttached: verify.imagesAttached,
-    totalQty: plan.variants.reduce((n, v) => n + v.qty, 0),
-    variantsInStock: plan.variants.filter((v) => v.qty > 0).length,
-    price: plan.price,
-    needsPricing: plan.tags.includes("needs-pricing"),
-  };
-  return { productId: productGid, createdNew, mediaUploaded, verify, summary };
 }
