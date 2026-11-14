@@ -82,3 +82,13 @@ test("auto drafts alerts: quiet run raises nothing; over-cap, failure, blocked a
   const over = alertsFor(report({ overCap: ["A", "B"] }), 15).find((a) => a.kind === "auto_drafts_over_cap")!;
   assert.match(over.subject!, /2 more favorite\(s\) waiting \(cap 15 per run\)/);
 });
+
+import { normalizeMediaFilename, parseFilename } from "../lib/shopify-media";
+
+test("media filenames: Shopify's de-dup UUID is ignored, so every color still links to its variants", () => {
+  const dup = "https://cdn.shopify.com/s/files/1/x/3801286_300_01_350da551-761c-4369-a556-d790546ba813.jpg?v=1";
+  assert.equal(normalizeMediaFilename(dup), "3801286_300_01.jpg");
+  assert.deepEqual(parseFilename(dup), { code: "300", seq: "01" });
+  assert.deepEqual(parseFilename("https://cdn.shopify.com/s/files/1/x/3801286_000_01.jpg"), { code: "000", seq: "01" });
+  assert.deepEqual(parseFilename("3801286_600_02.png"), { code: "600", seq: "02" });
+});

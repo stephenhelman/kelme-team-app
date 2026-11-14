@@ -44,9 +44,18 @@ const APPEND_MUTATION = `
   }
 `;
 
-function parseFilename(url: string): { code: string; seq: string } | null {
-  const fname = url.split("/").pop()?.split("?")[0] ?? "";
-  const m = fname.match(/^.+?_(\w+)_(\d+)\.\w+$/);
+// Shopify de-duplicates an uploaded file whose name already exists in the store's files by inserting a
+// UUID before the extension: "3801286_300_01.jpg" -> "3801286_300_01_350da551-761c-4369-a556-d790546ba813.jpg".
+const DEDUP_UUID = /_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?=\.\w+$)/i;
+
+/** The filename of a media URL with Shopify's de-duplication UUID removed. */
+export function normalizeMediaFilename(urlOrName: string): string {
+  const fname = urlOrName.split("?")[0].split("/").pop() ?? "";
+  return fname.replace(DEDUP_UUID, "");
+}
+
+export function parseFilename(url: string): { code: string; seq: string } | null {
+  const m = normalizeMediaFilename(url).match(/^.+?_(\w+)_(\d+)\.\w+$/);
   return m ? { code: m[1], seq: m[2] } : null;
 }
 

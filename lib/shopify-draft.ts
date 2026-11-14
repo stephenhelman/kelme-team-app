@@ -30,7 +30,7 @@ import {
   type OptionValueTarget,
   type TargetVariant,
 } from "@/lib/shopify-reconcile";
-import { executeMedia } from "@/lib/shopify-media";
+import { executeMedia, normalizeMediaFilename } from "@/lib/shopify-media";
 import { executeSizeOrder } from "@/lib/shopify-order";
 import { CANONICAL_SIZE_ORDER } from "@/lib/sizes";
 import {
@@ -346,8 +346,9 @@ async function waitForMediaReady(productGid: string, expected: number): Promise<
   throw new Error(`media on ${productGid} not READY after polling (expected ${expected})`);
 }
 
+// Compared without Shopify's de-duplication UUID, so a resume never re-uploads an image it already has.
 function filenameOf(url: string | undefined): string {
-  return (url ?? "").split("?")[0].split("/").pop() ?? "";
+  return normalizeMediaFilename(url ?? "");
 }
 
 const PRODUCT_ATTACH_MEDIA_MUTATION = `
