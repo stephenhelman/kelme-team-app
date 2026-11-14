@@ -44,7 +44,7 @@
  *       the first Shopify failure, and prints the run id for the email step.
  *       Add --email [--to someone@example.com] to email the drafts this run created right after it finishes.
  *
- *   npm run drafts -- email --run <id> [--to someone@example.com] [--send]
+ *   npm run drafts -- email (--run <id> | --styles A,B,C) [--to someone@example.com] [--send]
  *       The vendor email ("X new products are ready for you to price") for the
  *       drafts one run created. Dry-run prints it and writes draft-email-preview.html;
  *       --send emails KELME_VENDOR_EMAIL (cc ADMIN_NOTIFY_EMAIL), once per run.
@@ -241,23 +241,27 @@ async function main(): Promise<void> {
   }
   if (cmd === "email") {
     const runId = Number(opt("run"));
-    if (!runId) {
-      console.error("Usage: npm run drafts -- email --run <id> [--send]");
+    const stylesArg = opt("styles")?.split(",").map((x) => x.trim()).filter(Boolean);
+    if (!runId && !stylesArg?.length) {
+      console.error("Usage: npm run drafts -- email (--run <id> | --styles A,B,C) [--to addr] [--send]");
       process.exit(1);
     }
-    const run = await prisma.draftRun.findUnique({ where: { id: runId } });
-    if (!run) throw new Error(`no DraftRun ${runId}`);
-    const items = await runEmailItems(runId);
-    if (items.length === 0) return console.log(`Run ${runId} created no drafts — nothing to email.`);
+    // --styles: drafts created in earlier single-style runs that no email covered. Not tied to a run, so nothing is marked as emailed.
+    const run = runId ? await prisma.draftRun.findUnique({ where: { id: runId } }) : null;
+    if (runId && !run) throw new Error(`no DraftRun ${runId}`);
+    const items = stylesArg?.length
+      ? (await prisma.draftJob.findMany({ where: { styleCode: { in: stylesArg }, status: "CREATED" }, orderBy: { styleCode: "asc" } })).flatMap((j) => (j.summary ? [j.summary as unknown as import("@/lib/draft-email").DraftEmailItem] : []))
+      : await runEmailItems(runId);
+    if (items.length === 0) return console.log("No created drafts found for that selection — nothing to email.");
     const base = `https://${shopDomain()}/admin`;
     const mail = renderNewDraftsEmail(items, base);
     await writeFile("draft-email-preview.html", mail.html, "utf8");
     console.log(`To: ${opt("to") ?? process.env.KELME_VENDOR_EMAIL ?? "(KELME_VENDOR_EMAIL NOT SET)"}   Cc: ${process.env.ADMIN_NOTIFY_EMAIL ?? "(none)"}\nSubject: ${mail.subject}\n\n${mail.text}\n\nHTML preview: draft-email-preview.html`);
-    if (run.emailedAt) console.log(`\nNOTE: run ${runId} was already emailed to ${run.emailedTo} at ${run.emailedAt.toISOString()}.`);
-    if (!flag("send")) return console.log(`\nDry-run only — nothing sent. Re-run with --send to email the vendor about ${items.length} draft(s).`);
-    if (run.emailedAt && !flag("force")) throw new Error("already emailed — pass --force to send again");
-    const sent = await sendNewDraftsEmail(items, { adminBaseUrl: base, runId, to: opt("to") });
-    await prisma.draftRun.update({ where: { id: runId }, data: { emailedAt: new Date(), emailedTo: sent.to } });
+    if (run?.emailedAt) console.log(`\nNOTE: run ${runId} was already emailed to ${run.emailedTo} at ${run.emailedAt.toISOString()}.`);
+    if (!flag("send")) return console.log(`\nDry-run only — nothing sent. Re-run with --send to email ${items.length} draft(s).`);
+    if (run?.emailedAt && !flag("force")) throw new Error("already emailed — pass --force to send again");
+    const sent = await sendNewDraftsEmail(items, { adminBaseUrl: base, runId: runId || 0, to: opt("to") });
+    if (runId) await prisma.draftRun.update({ where: { id: runId }, data: { emailedAt: new Date(), emailedTo: sent.to } });
     console.log(`\nSENT to ${sent.to}${sent.cc ? ` (cc ${sent.cc})` : ""} for ${items.length} draft(s) (resend id ${sent.id ?? "n/a"}).`);
     return;
   }
