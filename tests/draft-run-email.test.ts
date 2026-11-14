@@ -50,3 +50,35 @@ test("email: phone friendly (single narrow column, no wide table) and escapes na
   assert.match(m.html, /max-width:600px/);
   assert.match(m.html, /A &lt;b&gt; &amp; C/);
 });
+
+import { alertsFor, autoConfigFromEnv, dueForRun } from "../lib/auto-drafts";
+import type { RunReport } from "../lib/draft-run";
+
+test("auto drafts: off by default, only the exact string 'true' enables it, cap defaults to 15", () => {
+  assert.deepEqual(autoConfigFromEnv({}), { enabled: false, cap: 15 });
+  assert.equal(autoConfigFromEnv({ AUTO_DRAFTS_ENABLED: "1" }).enabled, false);
+  assert.equal(autoConfigFromEnv({ AUTO_DRAFTS_ENABLED: "true" }).enabled, true);
+  assert.equal(autoConfigFromEnv({ MAX_DRAFTS_PER_RUN: "5" }).cap, 5);
+  assert.equal(autoConfigFromEnv({ MAX_DRAFTS_PER_RUN: "abc" }).cap, 15);
+  assert.equal(autoConfigFromEnv({ MAX_DRAFTS_PER_RUN: "0" }).cap, 15);
+});
+
+test("auto drafts: one attempt per day, success or failure (no retry loop)", () => {
+  const now = new Date("2026-11-15T12:00:00Z");
+  assert.equal(dueForRun(null, now), true);
+  assert.equal(dueForRun(new Date("2026-11-15T09:00:00Z"), now), false);
+  assert.equal(dueForRun(new Date("2026-11-14T10:00:00Z"), now), true);
+});
+
+const report = (over: Partial<RunReport> = {}): RunReport => ({ runId: 7, source: "auto", pending: 0, created: [], blocked: [], failed: [], skipped: [], overCap: [], needsHuman: [], stoppedReason: null, ...over });
+const bad = (r: RunReport) => alertsFor(r, 15).filter((a) => a.isBad).map((a) => a.kind);
+
+test("auto drafts alerts: quiet run raises nothing; over-cap, failure, blocked and stuck each raise their own", () => {
+  assert.deepEqual(bad(report()), []);
+  assert.deepEqual(bad(report({ overCap: ["A", "B"] })), ["auto_drafts_over_cap"]);
+  assert.deepEqual(bad(report({ failed: [{ styleCode: "X", status: "failed", message: "boom" }], stoppedReason: "failure on X" })), ["auto_drafts_failure"]);
+  assert.deepEqual(bad(report({ blocked: [{ styleCode: "Y", status: "blocked", message: "unknown size" }] })), ["auto_drafts_blocked"]);
+  assert.deepEqual(bad(report({ needsHuman: [{ styleCode: "Z", status: "FAILED" }] })), ["auto_drafts_stuck"]);
+  const over = alertsFor(report({ overCap: ["A", "B"] }), 15).find((a) => a.kind === "auto_drafts_over_cap")!;
+  assert.match(over.subject!, /2 more favorite\(s\) waiting \(cap 15 per run\)/);
+});

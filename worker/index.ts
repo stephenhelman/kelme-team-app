@@ -12,6 +12,7 @@ import { executeRelink } from "@/lib/shopify-relink";
 import { reportSyncAlert } from "@/lib/admin-notify";
 import { recordSuccessfulSync } from "@/lib/sync-status";
 import { pollOrderFiles } from "@/lib/order-file-worker";
+import { autoConfigFromEnv, runAutoDraftsOnce } from "@/lib/auto-drafts";
 
 const SYNC_INTERVAL_MS = 4 * 60 * 60 * 1000;
 // Order-intake poll (lib/order-file-worker.ts): short, since a paid order's
@@ -154,7 +155,9 @@ async function runSync(): Promise<void> {
   log("sync: complete");
 }
 
+let syncRunning = false;
 async function runSyncSafely(): Promise<void> {
+  syncRunning = true;
   try {
     await runSync();
     await reportSyncAlert({ kind: "sync_failure", isBad: false });
@@ -169,6 +172,8 @@ async function runSyncSafely(): Promise<void> {
     }).catch((notifyErr) =>
       log(`sync: failed to report sync_failure alert: ${notifyErr instanceof Error ? notifyErr.message : String(notifyErr)}`),
     );
+  } finally {
+    syncRunning = false;
   }
 }
 
@@ -200,3 +205,25 @@ setInterval(runSyncSafely, SYNC_INTERVAL_MS);
 log(`worker: order-file poll every ${ORDER_POLL_INTERVAL_MS / 1000}s`);
 pollOrdersSafely();
 setInterval(pollOrdersSafely, ORDER_POLL_INTERVAL_MS);
+
+// Daily favorites -> drafts (lib/auto-drafts.ts). Off unless AUTO_DRAFTS_ENABLED=true. The hourly tick only
+// *checks* whether a run is due (one attempt per ~day, recorded in the DB, so a restart or crash never loops).
+const AUTO_DRAFTS_TICK_MS = 60 * 60 * 1000;
+let autoDraftsRunning = false;
+async function autoDraftsSafely(): Promise<void> {
+  if (autoDraftsRunning || syncRunning) return; // never overlap itself or the inventory sync; the next tick checks again
+  autoDraftsRunning = true;
+  try {
+    await runAutoDraftsOnce(log);
+  } catch (err) {
+    log(`auto-drafts: tick failed: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    autoDraftsRunning = false;
+  }
+}
+const autoCfg = autoConfigFromEnv(process.env);
+log(`worker: auto-drafts ${autoCfg.enabled ? `ENABLED (cap ${autoCfg.cap}/run, checked hourly)` : "disabled (set AUTO_DRAFTS_ENABLED=true to enable)"}`);
+if (autoCfg.enabled) {
+  setTimeout(autoDraftsSafely, 3 * 60 * 1000); // let the first sync get going
+  setInterval(autoDraftsSafely, AUTO_DRAFTS_TICK_MS);
+}

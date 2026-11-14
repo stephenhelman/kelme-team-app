@@ -215,12 +215,14 @@ async function ensureDbProduct(f: Favorite): Promise<void> {
   if (!cap.ok) throw new Error(`Kelme re-capture failed: ${cap.error ?? "capture failed"}`);
 }
 
-export async function runDrafts(opts: { source: "manual" | "auto"; cap?: number; only?: string[]; log?: (m: string) => void }): Promise<RunReport> {
+export async function runDrafts(opts: { source: "manual" | "auto"; cap?: number; only?: string[]; runId?: number; log?: (m: string) => void }): Promise<RunReport> {
   const log = opts.log ?? ((m: string) => console.log(m));
   const favs = await fetchFavorites();
   let sel = await loadSelection(favs, opts.cap);
   if (opts.only?.length) sel = { ...sel, pending: sel.pending.filter((f) => opts.only!.includes(f.no)) };
-  const run = await prisma.draftRun.create({ data: { source: opts.source, pending: sel.pending.length + sel.overCap.length, overCap: sel.overCap.length } });
+  const counts = { pending: sel.pending.length + sel.overCap.length, overCap: sel.overCap.length };
+  // The daily job creates the run row BEFORE any network call (it doubles as the "attempted today" marker).
+  const run = opts.runId ? await prisma.draftRun.update({ where: { id: opts.runId }, data: counts }) : await prisma.draftRun.create({ data: { source: opts.source, ...counts } });
   const report: RunReport = { runId: run.id, source: opts.source, pending: sel.pending.length + sel.overCap.length, created: [], blocked: [], failed: [], skipped: [], overCap: sel.overCap.map((f) => f.no), needsHuman: sel.needsHuman, stoppedReason: null };
   log(`run ${run.id} (${opts.source}): ${favs.length} favorites; not on Shopify ${report.pending}; creating ${sel.pending.length}; over cap ${sel.overCap.length}; needs a person ${sel.needsHuman.length}`);
 
