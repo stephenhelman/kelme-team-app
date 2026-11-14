@@ -132,6 +132,8 @@ export interface PlanDraftOptions {
   excludedNotes?: string[];
   /** HEAD-check each color image; unreachable ones are left off and the product is tagged needs-images. */
   checkImages?: boolean;
+  /** Resuming a partial draft: the DB's onShopify flag (set during the first attempt's link-back) is expected, not a blocker. */
+  resume?: boolean;
 }
 
 export async function planDraft(styleCode: string, opts: PlanDraftOptions = {}): Promise<DraftPlan> {
@@ -183,7 +185,7 @@ export async function planDraft(styleCode: string, opts: PlanDraftOptions = {}):
     categoryMap,
   );
   const blockers = [...ev.blockers];
-  if (product.onShopify) blockers.push("DB already has onShopify=true");
+  if (product.onShopify && !opts.resume) blockers.push("DB already has onShopify=true");
 
   return {
     styleCode,
@@ -631,7 +633,7 @@ export async function executeDraft(styleCode: string, opts: { resume?: boolean; 
   if (recap.error) throw new Error(`Kelme re-capture failed: ${recap.error}`);
   if (recap.dropNotes.length > 0) throw new Error(`Cannot execute — Kelme re-capture dropped sizes, not a clean product: ${recap.dropNotes.join("; ")}`);
 
-  const plan = await planDraft(styleCode, { categoryMap: opts.categoryMap, excludedNotes: recap.excludedNotes, checkImages: true });
+  const plan = await planDraft(styleCode, { categoryMap: opts.categoryMap, excludedNotes: recap.excludedNotes, checkImages: true, resume });
   if (plan.blockers.length > 0) throw new Error(`Cannot execute — ${plan.blockers.join("; ")}`);
 
   // 2. productCreate (or adopt the partial draft on --resume).

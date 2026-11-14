@@ -18,10 +18,13 @@ export type JobDecision = "create" | "skip-created" | "skip-needs-human" | "resu
 
 /** Pure: what the lock says to do for a style given its current job row. */
 export function decideJob(existing: { status: string } | null, resume: boolean): JobDecision {
+  if (existing?.status === "CREATED") return "skip-created";
+  // An explicit --resume always continues the existing draft, whatever the job row says
+  // (FAILED / CREATING, or BLOCKED by an earlier resume attempt, or no row for a draft made before the lock existed).
+  if (resume) return "resume";
   if (!existing || existing.status === "BLOCKED") return "create";
-  if (existing.status === "CREATED") return "skip-created";
-  // CREATING (interrupted / another runner) or FAILED (partial draft)
-  return resume ? "resume" : "skip-needs-human";
+  // CREATING (interrupted / another runner) or FAILED (partial draft): never retried automatically.
+  return "skip-needs-human";
 }
 
 export interface JobOutcome {

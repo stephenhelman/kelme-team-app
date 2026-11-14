@@ -89,4 +89,6 @@ test("DraftJob lock: created is skipped, interrupted/failed needs a human, block
   assert.equal(decideJob({ status: "CREATING" }, false), "skip-needs-human");
   assert.equal(decideJob({ status: "FAILED" }, false), "skip-needs-human");
   assert.equal(decideJob({ status: "FAILED" }, true), "resume");
+  assert.equal(decideJob({ status: "BLOCKED" }, true), "resume"); // a resume that was wrongly blocked can be retried
+  assert.equal(decideJob(null, true), "resume");
 });
