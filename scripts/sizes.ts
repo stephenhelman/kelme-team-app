@@ -54,6 +54,7 @@ import { sellableApparelLabels } from "@/lib/size-config";
 import { createVariables, executeSeed, planSeed } from "@/lib/size-seed";
 import { liveStyleCodes, planExtended, reportMarkdown, type ExtendedRow } from "@/lib/size-extended";
 import { writeFileSync } from "node:fs";
+import { executeManualRemoval, planManualRemoval } from "@/lib/manual-variants";
 
 async function seed(execute: boolean) {
   const plan = await planSeed();
@@ -375,6 +376,36 @@ async function extendedReport() {
   console.log("Written: extended-sizes-report.md (read-only; nothing written to the DB or Shopify)");
 }
 
+async function removeManual(execute: boolean) {
+  const size = arg("size") ?? "XS";
+  const expectArg = arg("expect");
+  const plan = await planManualRemoval(size);
+  const rm = plan.verdicts.filter((v) => v.remove);
+  const keep = plan.verdicts.filter((v) => !v.remove);
+  console.log(`Shopify variants with Size=${size}: ${plan.verdicts.length}. Hand-made and removable: ${rm.length}. Not touched: ${keep.length}.`);
+  console.log(`(orders since the oldest candidate were checked: ${plan.ordersChecked})\n\nTO DELETE:`);
+  for (const v of rm) console.log(`  ${(v.styleCode ?? "?").padEnd(12)} color ${(v.colorCode ?? "?").padEnd(5)} ${v.variant.color}  size ${v.variant.size}  on_hand ${v.variant.onHand ?? "no level"}  price ${v.variant.price}  ${v.variant.id}`);
+  const refused = keep.filter((v) => !v.variant.sku && !v.variant.itemSku);
+  console.log(`\nBLANK-SKU ${size} variants that will NOT be deleted: ${refused.length}`);
+  for (const v of refused) console.log(`  ${v.variant.productTitle.slice(-40)} ${v.variant.color}: ${v.reasons.join("; ")}`);
+  const perStyle = new Map<string, number>();
+  for (const v of rm) perStyle.set(v.styleCode ?? "?", (perStyle.get(v.styleCode ?? "?") ?? 0) + 1);
+  console.log(`\nper product: ${[...perStyle].map(([k, n]) => `${k}:${n}`).join("  ")}`);
+  if (expectArg && Number(expectArg) !== rm.length) {
+    console.log(`\nSTOPPED: expected ${expectArg} removable variants but found ${rm.length}.`);
+    process.exitCode = 1;
+    return;
+  }
+  if (!execute) return console.log("\nDRY RUN — nothing deleted. Re-run with --execute (add --expect 51 to refuse if the count differs).");
+  const res = await executeManualRemoval(plan);
+  console.log(`\ndeleted ${res.deleted} variant(s); dropped unused ${size} option value on ${res.optionValuesDropped.length} product(s)`);
+  for (const p of res.problems) console.log(`PROBLEM: ${p}`);
+  const after = await dryRunRelink();
+  console.log(`relink check: shopifyUnmatched = ${after.shopifyUnmatched.length} (expected 0)`);
+  for (const u of after.shopifyUnmatched.slice(0, 20)) console.log(`  ${u.productTitle.slice(-40)} ${u.colorCode}/${u.size}: ${u.reason}`);
+  if (after.shopifyUnmatched.length > 0 || res.problems.length > 0) process.exitCode = 1;
+}
+
 async function main() {
   const [cmd] = process.argv.slice(2);
   const execute = process.argv.includes("--execute");
@@ -390,7 +421,8 @@ async function main() {
   if (cmd === "extended-report") return extendedReport();
   if (cmd === "add-sizes-batch") return addSizesBatch(execute);
   if (cmd === "add-sizes-rollback") return addSizesRollback(execute);
-  throw new Error(`unknown command "${cmd}" — expected: seed | relabel | rollback | relabel-batch | rollback-batch | add-sizes | add-sizes-batch | add-sizes-rollback | extended-report | status | post-check | drop-old-sizes`);
+  if (cmd === "remove-manual") return removeManual(execute);
+  throw new Error(`unknown command "${cmd}" — expected: remove-manual | seed | relabel | rollback | relabel-batch | rollback-batch | add-sizes | add-sizes-batch | add-sizes-rollback | extended-report | status | post-check | drop-old-sizes`);
 }
 
 main().then(() => process.exit(process.exitCode ?? 0), (e) => { console.error(e); process.exit(1); });

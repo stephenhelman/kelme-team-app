@@ -9,7 +9,7 @@
  *                      -> DraftJob DELETED_BY_VENDOR (auto drafter never recreates it; only an explicit
  *                         `drafts create --styleCode X` can).
  *   removed variant  — the product is still on Shopify but a linked variant id is gone and the variant didn't
- *                      re-match (e.g. a color or size the vendor deleted). Ids are nulled automatically; recording a
+ *                      re-match (e.g. a color or size the vendor deleted). Ids are KEPT until recorded; recording a
  *                      VendorRemoval (so capture / add-sizes / rebuild never recreate it) is explicit
  *                      (`npm run vendor-deletions -- --execute`), because our own tooling also deletes variants.
  */
