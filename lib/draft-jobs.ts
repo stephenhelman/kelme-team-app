@@ -14,10 +14,13 @@ import { executeDraft, PartialDraftError, type VerifyReport } from "@/lib/shopif
 import type { CategoryMap } from "@/lib/draft-rules";
 import type { DraftEmailItem } from "@/lib/draft-email";
 
-export type JobDecision = "create" | "skip-created" | "skip-needs-human" | "resume";
+export type JobDecision = "create" | "skip-created" | "skip-needs-human" | "resume" | "skip-deleted";
 
 /** Pure: what the lock says to do for a style given its current job row. */
-export function decideJob(existing: { status: string } | null, resume: boolean): JobDecision {
+export function decideJob(existing: { status: string } | null, resume: boolean, explicit = false): JobDecision {
+  // The vendor deleted this product on purpose: nothing automatic (the daily drafter, --all, batch --all-clean) may
+  // recreate it. Only an explicit single-style `create --styleCode X` (explicit=true) can; --resume is not an override.
+  if (existing?.status === "DELETED_BY_VENDOR") return explicit ? "create" : "skip-deleted";
   if (existing?.status === "CREATED") return "skip-created";
   // An explicit --resume always continues the existing draft, whatever the job row says
   // (FAILED / CREATING, or BLOCKED by an earlier resume attempt, or no row for a draft made before the lock existed).
@@ -36,9 +39,10 @@ export interface JobOutcome {
   verify?: VerifyReport;
 }
 
-export async function createDraftTracked(styleCode: string, opts: { runId: number; categoryMap?: CategoryMap; resume?: boolean }): Promise<JobOutcome> {
+export async function createDraftTracked(styleCode: string, opts: { runId: number; categoryMap?: CategoryMap; resume?: boolean; explicit?: boolean }): Promise<JobOutcome> {
   const existing = await prisma.draftJob.findUnique({ where: { styleCode } });
-  const decision = decideJob(existing, opts.resume === true);
+  const decision = decideJob(existing, opts.resume === true, opts.explicit === true);
+  if (decision === "skip-deleted") return { styleCode, status: "skipped", message: "deleted by the vendor in Shopify — never auto-recreated (override: npm run drafts -- create --styleCode " + styleCode + " --execute)" };
   if (decision === "skip-created") return { styleCode, status: "skipped", message: "already created", productGid: existing?.productGid ?? undefined };
   if (decision === "skip-needs-human") {
     return { styleCode, status: "skipped", message: `a previous attempt is ${existing!.status}${existing!.error ? ` (${existing!.error.slice(0, 160)})` : ""} — needs a person: npm run drafts -- create --styleCode ${styleCode} --execute --resume`, productGid: existing?.productGid ?? undefined };

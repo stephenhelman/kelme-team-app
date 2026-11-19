@@ -22,6 +22,11 @@ import { shopifyGraphQL } from "@/lib/shopify";
 import { parseColorCode } from "@/lib/shopify-reconcile";
 import { ONE_SIZE } from "@/lib/sku";
 import { colorBelongsToTitle, matchingStyleCodes } from "@/lib/style-match";
+import { detectVendorDeletions, markDeletedProducts, DELETED_BY_VENDOR, type DbVariantLite, type VendorDeletions } from "@/lib/vendor-deletions";
+
+// relinkProducts reads variants(first: 250). A product that fills the page may have variants we didn't see, so
+// "this id is gone" can't be trusted for it — deletion detection is skipped entirely in that case.
+const VARIANT_PAGE = 250;
 
 interface ShopifyProductNode {
   id: string;
@@ -102,8 +107,16 @@ async function buildShopifyIndex(dbStyleCodes: string[]): Promise<{
   ambiguousProducts: { productId: string; title: string; matchedStyleCodes: string[] }[];
   allFlat: FlatShopifyVariant[];
   unlistedProducts: { productId: string; title: string; status: string; styleCode: string }[];
+  liveVariantIds: Set<string>; // EVERY variant id on Shopify, any product status / title match
+  truncated: boolean; // some product filled the variants page — absence of an id proves nothing
 }> {
   const products = await fetchAllShopifyProducts();
+  const liveVariantIds = new Set<string>();
+  let truncated = false;
+  for (const p of products) {
+    if (p.variants.edges.length >= VARIANT_PAGE) truncated = true;
+    for (const { node } of p.variants.edges) liveVariantIds.add(node.id);
+  }
   const byKey = new Map<string, FlatShopifyVariant[]>();
   const ambiguousProducts: { productId: string; title: string; matchedStyleCodes: string[] }[] = [];
   const allFlat: FlatShopifyVariant[] = [];
@@ -167,7 +180,7 @@ async function buildShopifyIndex(dbStyleCodes: string[]): Promise<{
     }
   }
 
-  return { byKey, ambiguousProducts, allFlat, unlistedProducts };
+  return { byKey, ambiguousProducts, allFlat, unlistedProducts, liveVariantIds, truncated };
 }
 
 export interface DbUnmatchedEntry {
@@ -214,6 +227,8 @@ export interface RelinkDryRunResult {
   productsOnShopify: number;
   productsFavoritesOnly: number;
   // internal, used by executeRelink — not meant for display
+  vendorDeletions: VendorDeletions; // products/variants whose stored Shopify ids no longer exist (see lib/vendor-deletions.ts)
+  _allDbVariants?: DbVariantLite[];
   _matches?: { variantDbId: number; shopifyVariantId: string; shopifyInventoryItemId: string | null }[];
   _productOnShopify?: Map<number, boolean>; // Product.id -> onShopify
 }
@@ -222,14 +237,14 @@ export async function dryRunRelink(): Promise<RelinkDryRunResult> {
   const dbProducts = await prisma.product.findMany({ select: { id: true, styleCode: true } });
   const dbStyleCodes = [...new Set(dbProducts.map((p) => p.styleCode))];
 
-  const { byKey, ambiguousProducts, allFlat, unlistedProducts } = await buildShopifyIndex(dbStyleCodes);
+  const { byKey, ambiguousProducts, allFlat, unlistedProducts, liveVariantIds, truncated } = await buildShopifyIndex(dbStyleCodes);
 
   // styleCodes whose title matched at least one live Shopify product — used to
   // tell "favorites-only, correctly unmatched" apart from a real link failure.
   const styleCodesSeenOnShopify = new Set(allFlat.map((f) => f.styleCode));
 
   const dbVariants = await prisma.variant.findMany({
-    select: { id: true, colorCode: true, shopifySize: true, sku: true, product: { select: { id: true, styleCode: true } } },
+    select: { id: true, colorCode: true, shopifySize: true, sku: true, qty: true, shopifyVariantId: true, product: { select: { id: true, styleCode: true } } },
   });
 
   const dbUnmatched: DbUnmatchedEntry[] = [];
@@ -323,7 +338,24 @@ export async function dryRunRelink(): Promise<RelinkDryRunResult> {
   const productsOnShopify = [...productOnShopify.values()].filter(Boolean).length;
   const productsFavoritesOnly = productOnShopify.size - productsOnShopify;
 
+  const lite: DbVariantLite[] = dbVariants.map((v) => ({
+    id: v.id,
+    productId: v.product.id,
+    styleCode: v.product.styleCode,
+    colorCode: v.colorCode,
+    shopifySize: v.shopifySize,
+    sku: v.sku,
+    qty: v.qty,
+    shopifyVariantId: v.shopifyVariantId,
+  }));
+  if (truncated) console.warn("[relink] a Shopify product filled the 250-variant page — vendor-deletion detection skipped this run");
+  const vendorDeletions: VendorDeletions = truncated
+    ? { deletedProducts: [], removedVariants: [], staleVariantDbIds: [] }
+    : detectVendorDeletions(lite, new Set(matches.map((m) => m.variantDbId)), liveVariantIds);
+
   return {
+    vendorDeletions,
+    _allDbVariants: lite,
     totalDbVariants: dbVariants.length,
     matchedCount: matches.length,
     ambiguousMatchCount,
@@ -350,6 +382,12 @@ export interface RelinkExecuteResult {
   // Products that were onShopify:true before this run and are false after it — their Shopify product
   // disappeared (or went UNLISTED/ARCHIVED) since the last relink. Surfaced so a deletion is never silent.
   flippedOff: { styleCode: string; variants: number; qty: number }[];
+  // Whole products gone from Shopify: ids nulled, onShopify:false, DraftJob DELETED_BY_VENDOR (never auto-recreated).
+  deletedProducts: { styleCode: string; variants: number; qty: number }[];
+  // Variants gone from a product that is still live (e.g. a color the vendor deleted):
+  // ids are KEPT; `npm run vendor-deletions -- --execute` records them (VendorRemoval) so nothing recreates them.
+  removedVariants: { sku: string; qty: number }[];
+  staleLinksNulled: number;
 }
 
 export async function executeRelink(): Promise<RelinkExecuteResult> {
@@ -367,6 +405,17 @@ export async function executeRelink(): Promise<RelinkExecuteResult> {
       },
     });
     updated++;
+  }
+
+  // Stale links: the stored ids point at nothing. Null them so the push never sees a dead inventory item again.
+  const { deletedProducts, removedVariants, staleVariantDbIds } = dryRun.vendorDeletions;
+  let staleLinksNulled = 0;
+  if (staleVariantDbIds.length > 0) {
+    const r = await prisma.variant.updateMany({ where: { id: { in: staleVariantDbIds } }, data: { shopifyVariantId: null, shopifyInventoryItemId: null } });
+    staleLinksNulled = r.count;
+  }
+  if (deletedProducts.length > 0) {
+    await markDeletedProducts(deletedProducts, `${DELETED_BY_VENDOR}: product no longer exists on Shopify (detected by relink ${new Date().toISOString()}). Only an explicit \`drafts create --styleCode X\` recreates it.`);
   }
 
   const trueIds = [...productOnShopify.entries()].filter(([, v]) => v).map(([id]) => id);
@@ -395,5 +444,8 @@ export async function executeRelink(): Promise<RelinkExecuteResult> {
     productsSetOnShopifyTrue: trueIds.length,
     productsSetOnShopifyFalse: falseIds.length,
     flippedOff,
+    deletedProducts: deletedProducts.map((d) => ({ styleCode: d.styleCode, variants: d.variants, qty: d.qty })),
+    removedVariants: removedVariants.map((r) => ({ sku: r.sku, qty: r.qty })),
+    staleLinksNulled,
   };
 }

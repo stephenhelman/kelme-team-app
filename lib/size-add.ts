@@ -10,6 +10,7 @@ import { fetchSkuSheet } from "@/lib/kelme";
 import { parseSkuSheet } from "@/lib/stock";
 import { buildDeclaredVariants, captureProduct, isBallProduct, pullProductDeclaration } from "@/lib/kelme-capture";
 import { buildSku } from "@/lib/sku";
+import { isRemoved, loadRemovals } from "@/lib/vendor-deletions";
 import { dryRunBatch, executeBatch } from "@/lib/shopify-batch";
 import { buildOptionValues, colorOptionValue, dryRunReconcile } from "@/lib/shopify-reconcile";
 import { executeSizeOrder } from "@/lib/shopify-order";
@@ -47,8 +48,10 @@ export async function planAdd(styleCode: string, only: string[]): Promise<AddPla
   const { entries } = parseSkuSheet(sheet, styleCode);
   const declared = buildDeclaredVariants(entries, isBallProduct(product.name), allowed);
   const have = new Set(product.variants.map((v) => `${v.colorCode}::${v.shopifySize}`));
+  const removals = await loadRemovals(styleCode);
   for (const d of declared) {
     if (!only.includes(d.shopifySize)) continue;
+    if (isRemoved(removals, d.colorCode, d.shopifySize)) continue; // the vendor deleted this color/size on purpose
     if (have.has(`${d.colorCode}::${d.shopifySize}`)) plan.alreadyInDb++;
     else plan.newVariants.push({ colorCode: d.colorCode, colorName: d.colorName, size: d.shopifySize, qty: d.qty, sku: buildSku(styleCode, d.colorCode, d.shopifySize) });
   }

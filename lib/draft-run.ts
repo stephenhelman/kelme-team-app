@@ -63,15 +63,21 @@ export interface Selection {
   pending: Favorite[]; // to create now (after the cap)
   overCap: Favorite[]; // eligible but beyond the cap — left for the next run
   needsHuman: { styleCode: string; status: string }[]; // CREATING/FAILED from an earlier run
+  deletedByVendor: string[]; // DraftJob DELETED_BY_VENDOR — never auto-recreated
   alreadyOnShopify: number;
 }
 
 export function selectPending(favs: Favorite[], ctx: SelectionContext, cap?: number): Selection {
   const eligible: Favorite[] = [];
   const needsHuman: Selection["needsHuman"] = [];
+  const deletedByVendor: string[] = [];
   let already = 0;
   for (const f of [...favs].sort((a, b) => a.no.localeCompare(b.no))) {
     const st = ctx.jobStatus.get(f.no);
+    if (st === "DELETED_BY_VENDOR") {
+      deletedByVendor.push(f.no);
+      continue;
+    }
     if (st === "CREATED" || ctx.onShopify(f.no)) {
       already++;
       continue;
@@ -83,7 +89,7 @@ export function selectPending(favs: Favorite[], ctx: SelectionContext, cap?: num
     eligible.push(f); // no job, or BLOCKED (re-evaluated)
   }
   const n = cap === undefined ? eligible.length : Math.max(0, cap);
-  return { pending: eligible.slice(0, n), overCap: eligible.slice(n), needsHuman, alreadyOnShopify: already };
+  return { pending: eligible.slice(0, n), overCap: eligible.slice(n), needsHuman, deletedByVendor, alreadyOnShopify: already };
 }
 
 export async function loadSelection(favs: Favorite[], cap?: number): Promise<Selection> {

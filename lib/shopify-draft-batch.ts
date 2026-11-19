@@ -9,6 +9,7 @@
  * be repeated across a dozen products. A dead Kelme session always stops it.
  * Successfully created products are returned for ONE summary email.
  */
+import { prisma } from "@/lib/prisma";
 import { loadRecordedDropNotes, runPreflight } from "@/lib/draft-preflight";
 import { executeDraft, planDraft } from "@/lib/shopify-draft";
 import type { AddedProduct } from "@/lib/product-added-notify";
@@ -33,7 +34,12 @@ export async function selectAllClean(opts: { includeNoSize: boolean }): Promise<
   const run = await runPreflight({ capture: false, knownDropNotes: notes, knownExcludedNotes: excluded });
   const selected: string[] = [];
   const skipped: BatchSelection["skipped"] = [];
+  const deleted = new Set((await prisma.draftJob.findMany({ where: { status: "DELETED_BY_VENDOR" }, select: { styleCode: true } }).catch(() => [])).map((j) => j.styleCode));
   for (const r of run.results) {
+    if (deleted.has(r.styleCode)) {
+      skipped.push({ styleCode: r.styleCode, reason: "deleted by the vendor in Shopify (DELETED_BY_VENDOR) — never auto-recreated" });
+      continue;
+    }
     if (r.simpleApparel || (opts.includeNoSize && r.clean && !r.needsSplit)) selected.push(r.styleCode);
     else skipped.push({ styleCode: r.styleCode, reason: r.clean ? "clean but no size dimension (use --include-no-size)" : r.flags.join("; ") });
   }

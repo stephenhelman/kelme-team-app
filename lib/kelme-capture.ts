@@ -9,6 +9,7 @@
  */
 import { prisma } from "@/lib/prisma";
 import { buildSku } from "@/lib/sku";
+import { isRemoved, loadRemovals } from "@/lib/vendor-deletions";
 import { classifySize, EXCLUDED_NOTE_PREFIX } from "@/lib/size-config";
 import { parseSkuSheet, type SkuSheetEntry } from "@/lib/stock";
 import { fetchFavoritesPage, fetchProductDetail, fetchSkuSheet, type RawPriceListEntry, type RawProductDetail } from "@/lib/kelme";
@@ -152,6 +153,7 @@ export async function captureProduct(pdtid: number): Promise<CaptureProductResul
   const knownCodes = new Set(entries.map((e) => e.colorCode));
   const colorImages = buildColorImageMap(detail.allpic, styleCode, knownCodes);
   const isBall = isBallProduct(name);
+  const removals = await loadRemovals(styleCode);
 
   // 1. Color map self-maintains: upsert every colorCode -> colorName seen.
   const colorNameByCode = new Map<string, string>();
@@ -198,6 +200,10 @@ export async function captureProduct(pdtid: number): Promise<CaptureProductResul
     const { kelmeSize, shopifySize } = resolved;
     if (!allowedSizes.has(shopifySize)) {
       warnings.push(`size "${shopifySize}" (color ${entry.colorCode}) not in Size allow-list — dropped, not written`);
+      continue;
+    }
+    if (isRemoved(removals, entry.colorCode, shopifySize)) {
+      warnings.push(`excluded by policy variant (color ${entry.colorCode}, size ${shopifySize}) — removed by the vendor on Shopify, not written`);
       continue;
     }
     const sku = buildSku(styleCode, entry.colorCode, shopifySize);
@@ -437,7 +443,8 @@ export async function rebuildVariantsForProduct(pdtid: number, styleCode: string
   const { entries } = parseSkuSheet(sheet, resolvedStyleCode);
   const isBall = isBallProduct(name);
   const allowedSizes = new Set((await prisma.size.findMany({ select: { shopifySize: true } })).map((s) => s.shopifySize));
-  const declared = buildDeclaredVariants(entries, isBall, allowedSizes);
+  const removals = await loadRemovals(resolvedStyleCode);
+  const declared = buildDeclaredVariants(entries, isBall, allowedSizes).filter((d) => !isRemoved(removals, d.colorCode, d.shopifySize));
 
   const knownCodes = new Set(declared.map((d) => d.colorCode));
   const colorImages = buildColorImageMap(detail.allpic, resolvedStyleCode, knownCodes);

@@ -25,11 +25,18 @@ export function skippedStaleAlertBody(entries: { variantId: number; inventoryIte
   );
 }
 
-export function flipAlertBody(flips: { styleCode: string; variants: number; qty: number }[]): string {
-  const lines = flips.map((f) => `  - ${f.styleCode}: ${f.variants} variants, ${f.qty} units in the DB`);
+export function flipAlertBody(
+  flips: { styleCode: string; variants: number; qty: number }[],
+  deleted: { styleCode: string }[] = [],
+  removedVariants: { sku: string }[] = [],
+): string {
+  const gone = new Set(deleted.map((d) => d.styleCode));
+  const lines = flips.map((f) => `  - ${f.styleCode}: ${f.variants} variants, ${f.qty} units in the DB${gone.has(f.styleCode) ? "  [deleted in Shopify -> marked DELETED_BY_VENDOR, never auto-recreated]" : "  [unlisted/archived/retitled]"}`);
+  const rem = removedVariants.length
+    ? `\n\n${removedVariants.length} variant(s) were deleted from products that are still live (the push skips them every cycle until recorded):\n${removedVariants.slice(0, 30).map((r) => `  - ${r.sku}`).join("\n")}\nRecord them so nothing recreates them: npm run vendor-deletions -- --execute`
+    : "";
   return (
-    `${flips.length} product(s) went from on-Shopify to NOT on Shopify at the last relink — their Shopify product was ` +
-    `deleted, unlisted or archived:\n\n${lines.join("\n")}\n\n` +
+    `${flips.length} product(s) went from on-Shopify to NOT on Shopify at the last relink:\n\n${lines.join("\n")}${rem}\n\n` +
     "If this was not intentional, restore them in Shopify admin. If the vendor deleted them on purpose and never wants them, ask him to unfavorite them on Kelme."
   );
 }

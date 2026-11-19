@@ -268,3 +268,17 @@ model DraftJob {
 
   @@index([runId])
 }
+
+// Color/size combinations the vendor deleted from a LIVE Shopify product on purpose (relink detects them; recorded
+// explicitly by `npm run vendor-deletions -- --execute`). Capture, rebuild, add-sizes and the new-variant alert all
+// skip them, so they are never recreated. shopifySize "*" = the whole color.
+model VendorRemoval {
+  id          Int      @id @default(autoincrement())
+  styleCode   String
+  colorCode   String
+  shopifySize String   @default("*")
+  reason      String?
+  createdAt   DateTime @default(now())
+
+  @@unique([styleCode, colorCode, shopifySize])
+}

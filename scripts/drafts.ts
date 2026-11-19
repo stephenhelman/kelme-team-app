@@ -285,7 +285,7 @@ async function main(): Promise<void> {
       return;
     }
     const run = await prisma.draftRun.create({ data: { source: "manual", pending: 1 } });
-    const out = await createDraftTracked(styleCode!, { runId: run.id, resume: flag("resume") });
+    const out = await createDraftTracked(styleCode!, { runId: run.id, resume: flag("resume"), explicit: true });
     await prisma.draftRun.update({ where: { id: run.id }, data: { finishedAt: new Date(), created: out.status === "created" ? 1 : 0, failed: out.status === "failed" ? 1 : 0, blocked: out.status === "blocked" ? 1 : 0 } });
     console.log(`\n${out.status.toUpperCase()} ${styleCode}${out.productGid ? ` ${out.productGid}` : ""}${out.message ? ` — ${out.message}` : ""}  (run ${run.id})\n`);
     if (out.verify) printVerify(out.verify);

@@ -94,12 +94,12 @@ async function runSync(): Promise<void> {
     try {
       const relinkResult = await executeRelink();
       log(`sync: relink complete (updated=${relinkResult.updated} flippedOff=${relinkResult.flippedOff.length}) — retrying push`);
-      if (relinkResult.flippedOff.length > 0) {
+      if (relinkResult.flippedOff.length > 0 || relinkResult.removedVariants.length > 0) {
         await reportSyncAlert({
           kind: "onshopify_flip",
           isBad: true,
-          subject: `Kelme sync: ${relinkResult.flippedOff.length} product(s) disappeared from Shopify`,
-          body: flipAlertBody(relinkResult.flippedOff),
+          subject: `Kelme sync: ${relinkResult.flippedOff.length} product(s) and ${relinkResult.removedVariants.length} variant(s) disappeared from Shopify`,
+          body: flipAlertBody(relinkResult.flippedOff, relinkResult.deletedProducts, relinkResult.removedVariants),
         });
       } else {
         await reportSyncAlert({ kind: "onshopify_flip", isBad: false });
