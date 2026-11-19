@@ -347,6 +347,9 @@ export interface RelinkExecuteResult {
   shopifyUnmatchedCount: number;
   productsSetOnShopifyTrue: number;
   productsSetOnShopifyFalse: number;
+  // Products that were onShopify:true before this run and are false after it — their Shopify product
+  // disappeared (or went UNLISTED/ARCHIVED) since the last relink. Surfaced so a deletion is never silent.
+  flippedOff: { styleCode: string; variants: number; qty: number }[];
 }
 
 export async function executeRelink(): Promise<RelinkExecuteResult> {
@@ -369,6 +372,15 @@ export async function executeRelink(): Promise<RelinkExecuteResult> {
   const trueIds = [...productOnShopify.entries()].filter(([, v]) => v).map(([id]) => id);
   const falseIds = [...productOnShopify.entries()].filter(([, v]) => !v).map(([id]) => id);
 
+  const flipped = falseIds.length
+    ? await prisma.product.findMany({
+        where: { id: { in: falseIds }, onShopify: true },
+        select: { styleCode: true, variants: { select: { qty: true } } },
+        orderBy: { styleCode: "asc" },
+      })
+    : [];
+  const flippedOff = flipped.map((p) => ({ styleCode: p.styleCode, variants: p.variants.length, qty: p.variants.reduce((a, v) => a + v.qty, 0) }));
+
   if (trueIds.length > 0) {
     await prisma.product.updateMany({ where: { id: { in: trueIds } }, data: { onShopify: true } });
   }
@@ -382,5 +394,6 @@ export async function executeRelink(): Promise<RelinkExecuteResult> {
     shopifyUnmatchedCount: dryRun.shopifyUnmatched.length,
     productsSetOnShopifyTrue: trueIds.length,
     productsSetOnShopifyFalse: falseIds.length,
+    flippedOff,
   };
 }

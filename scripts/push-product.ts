@@ -25,7 +25,7 @@ async function main(): Promise<void> {
   const plan = await dryRunPush(styleCode);
   console.log(
     `location="${plan.location.name}" matchesExpected=${plan.location.matchesExpectedAddress} ` +
-      `variants=${plan.totalOnShopifyVariants} alreadyCorrect=${plan.alreadyCorrect} toPush=${plan.toPush.length} ` +
+      `variants=${plan.totalOnShopifyVariants} alreadyCorrect=${plan.alreadyCorrect} toPush=${plan.toPush.length} staleItems=${plan.staleItems.length} ` +
       `suspiciousDrops=${plan.suspiciousDrops.length} trackingDisabled=${plan.trackingDisabledCount} ` +
       `nullInventoryItemId=${plan.nullInventoryItemId.length}`,
   );
@@ -43,7 +43,7 @@ async function main(): Promise<void> {
 
   const report = await executePush({ styleCode, cycleId: `single-${styleCode}-${new Date().toISOString()}` });
   console.log(
-    `EXECUTE ok=${report.ok} failed=${report.failed} casConflicts=${report.casConflicts} ` +
+    `EXECUTE ok=${report.ok} failed=${report.failed} casConflicts=${report.casConflicts} skippedStale=${report.skippedStale} ` +
       `trackingEnabled=${report.trackingEnabled} trackingFailed=${report.trackingFailed.length}`,
   );
   for (const e of report.entries.filter((x) => x.status !== "ok")) console.log(`  ${e.status}: ${e.inventoryItemGid} ${e.message ?? ""}`);

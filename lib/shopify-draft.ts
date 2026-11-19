@@ -474,11 +474,12 @@ async function ensureInventory(items: { inventoryItemGid: string; qty: number }[
       assertOk("inventoryActivate", res.errors, res.data?.inventoryActivate.userErrors, res.data?.inventoryActivate);
       await sleep(CALL_PACING_MS);
     } else if (s.currentOnHand !== item.qty) {
-      const { staleIndexes } = await setQuantitiesWithBackoff(
+      const { staleIndexes, unusable } = await setQuantitiesWithBackoff(
         [{ inventoryItemId: item.inventoryItemGid, locationId: INVENTORY_LOCATION_ID, quantity: item.qty, changeFromQuantity: s.currentOnHand }],
         `draft:${item.inventoryItemGid}:${item.qty}`,
       );
       if (staleIndexes.length > 0) throw new Error(`inventory CAS conflict on ${item.inventoryItemGid}`);
+      if (unusable.length > 0) throw new Error(`inventory item ${item.inventoryItemGid} rejected: ${unusable[0].code} ${unusable[0].message}`);
       await sleep(CALL_PACING_MS);
     }
   }

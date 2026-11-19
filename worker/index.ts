@@ -11,6 +11,17 @@ import { executePush, verifyPush } from "@/lib/shopify-inventory-push";
 import { executeRelink } from "@/lib/shopify-relink";
 import { reportSyncAlert } from "@/lib/admin-notify";
 import { recordSuccessfulSync } from "@/lib/sync-status";
+import { isStaleIdMessage } from "@/lib/inventory-errors";
+import {
+  PUSH_FAILURE_ALERT_THRESHOLD,
+  VERIFY_MISMATCH_ALERT_THRESHOLD,
+  flipAlertBody,
+  shouldRecordSuccessfulSync,
+  shouldRelink,
+  skippedStaleAlertBody,
+  verifyMismatchAlertBody,
+} from "@/lib/sync-policy";
+import { prisma } from "@/lib/prisma";
 import { pollOrderFiles } from "@/lib/order-file-worker";
 import { autoConfigFromEnv, runAutoDraftsOnce } from "@/lib/auto-drafts";
 
@@ -19,18 +30,7 @@ const SYNC_INTERVAL_MS = 4 * 60 * 60 * 1000;
 // sheet should reach the vendor within about a minute. Independent of the sync.
 const ORDER_POLL_INTERVAL_MS = 60 * 1000;
 
-// A handful of failed variants in one push is typically transient
-// (rate-limit backoff, one bad batch) and self-recovers next cycle — not
-// worth an email. More than this, especially if it isn't a one-off, points
-// at something systemic (Shopify API issue, broken auth, mass stale IDs).
-const PUSH_FAILURE_ALERT_THRESHOLD = 20;
-
-// Matches Shopify's wording for a variant/inventory item that no longer
-// exists at the ID we have on file (rebuilt on Shopify since our last
-// relink) — the case the stale-ID self-heal targets specifically, not every
-// push failure (throttling, validation errors, etc. don't warrant a relink).
-const STALE_ID_PATTERN =
-  /does not exist|not found|invalid.*inventory ?item|could not find/i;
+// Failed-variant alert threshold lives in lib/sync-policy.ts (PUSH_FAILURE_ALERT_THRESHOLD).
 
 function log(message: string): void {
   console.log(`[${new Date().toISOString()}] ${message}`);
@@ -39,10 +39,7 @@ function log(message: string): void {
 function hasStaleIdFailure(
   entries: { status: string; message?: string }[],
 ): boolean {
-  return entries.some(
-    (e) =>
-      e.status === "failed" && e.message && STALE_ID_PATTERN.test(e.message),
-  );
+  return entries.some((e) => e.status === "failed" && isStaleIdMessage(e.message));
 }
 
 async function runSync(): Promise<void> {
@@ -86,26 +83,47 @@ async function runSync(): Promise<void> {
 
   let pushReport = await executePush({ cycleId });
   log(
-    `sync: push ok=${pushReport.ok} failed=${pushReport.failed} ` +
+    `sync: push ok=${pushReport.ok} failed=${pushReport.failed} skippedStale=${pushReport.skippedStale} ` +
       `trackingEnabled=${pushReport.trackingEnabled} trackingFailed=${pushReport.trackingFailed.length}`,
   );
+  // Entries for the skipped_stale alert, captured from the FIRST push (the retry re-skips the same items).
+  const staleEntries = pushReport.entries.filter((e) => e.status === "skipped_stale");
 
-  if (pushReport.failed > 0 && hasStaleIdFailure(pushReport.entries)) {
-    log(
-      "sync: stale inventory item ID detected in push failures — relinking and retrying once",
-    );
+  if (shouldRelink({ skippedStale: pushReport.skippedStale, failed: pushReport.failed, hasStaleIdFailure: hasStaleIdFailure(pushReport.entries) })) {
+    log("sync: deleted/stale inventory items detected — relinking and retrying once");
     try {
       const relinkResult = await executeRelink();
-      log(
-        `sync: relink complete (updated=${relinkResult.updated}) — retrying push`,
-      );
+      log(`sync: relink complete (updated=${relinkResult.updated} flippedOff=${relinkResult.flippedOff.length}) — retrying push`);
+      if (relinkResult.flippedOff.length > 0) {
+        await reportSyncAlert({
+          kind: "onshopify_flip",
+          isBad: true,
+          subject: `Kelme sync: ${relinkResult.flippedOff.length} product(s) disappeared from Shopify`,
+          body: flipAlertBody(relinkResult.flippedOff),
+        });
+      } else {
+        await reportSyncAlert({ kind: "onshopify_flip", isBad: false });
+      }
       pushReport = await executePush({ cycleId: `${cycleId}:retry` });
-      log(`sync: retry push ok=${pushReport.ok} failed=${pushReport.failed} casConflicts=${pushReport.casConflicts}`);
+      log(`sync: retry push ok=${pushReport.ok} failed=${pushReport.failed} skippedStale=${pushReport.skippedStale} casConflicts=${pushReport.casConflicts}`);
     } catch (err) {
-      log(
-        `sync: relink/retry failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      log(`sync: relink/retry failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+  } else {
+    await reportSyncAlert({ kind: "onshopify_flip", isBad: false });
+  }
+
+  if (staleEntries.length > 0) {
+    const entries = staleEntries;
+    const rows = await prisma.variant.findMany({ where: { id: { in: entries.map((e) => e.variantId) } }, select: { id: true, sku: true } });
+    await reportSyncAlert({
+      kind: "skipped_stale",
+      isBad: true,
+      subject: `Kelme sync: ${entries.length} variants skipped — inventory item deleted on Shopify`,
+      body: skippedStaleAlertBody(entries, new Map(rows.map((r) => [r.id, r.sku]))),
+    });
+  } else {
+    await reportSyncAlert({ kind: "skipped_stale", isBad: false });
   }
 
   if (pushReport.failed > PUSH_FAILURE_ALERT_THRESHOLD) {
@@ -150,9 +168,24 @@ async function runSync(): Promise<void> {
       `sync: verify mismatches: ${JSON.stringify(verifyResult.mismatched.slice(0, 10))}`,
     );
   }
+  if (verifyResult.mismatched.length > VERIFY_MISMATCH_ALERT_THRESHOLD) {
+    await reportSyncAlert({
+      kind: "verify_mismatch",
+      isBad: true,
+      subject: `Kelme sync: ${verifyResult.mismatched.length} variants differ from Shopify after the push`,
+      body: verifyMismatchAlertBody(verifyResult.mismatched.length, verifyResult.mismatched),
+    });
+  } else {
+    await reportSyncAlert({ kind: "verify_mismatch", isBad: false });
+  }
 
-  await recordSuccessfulSync();
-  log("sync: complete");
+  // The heartbeat only advances on a cycle whose push worked — otherwise "last successful sync" lies.
+  if (shouldRecordSuccessfulSync(pushReport.failed)) {
+    await recordSuccessfulSync();
+    log("sync: complete");
+  } else {
+    log(`sync: complete WITH ${pushReport.failed} FAILED push items — heartbeat NOT advanced`);
+  }
 }
 
 let syncRunning = false;

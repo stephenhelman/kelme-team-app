@@ -29,6 +29,7 @@ import { createHash } from "crypto";
 import path from "path";
 import { prisma } from "@/lib/prisma";
 import { shopifyGraphQL } from "@/lib/shopify";
+import { classifyUserErrors, type UnusableItem } from "@/lib/inventory-errors";
 
 const CALL_PACING_MS = 400;
 const WRITE_LOG_PATH = path.join(process.cwd(), "shopify-inventory-push-log.jsonl");
@@ -177,6 +178,10 @@ export interface DryRunPushResult {
   nullInventoryItemId: { variantId: number; sku: string }[];
   alreadyCorrect: number;
   toPush: PushCandidate[];
+  // Variants whose DB-linked inventory item no longer exists on Shopify (the product/variant was deleted). They
+  // can never be written, so they are NOT in toPush — executePush logs them skipped_stale instead of letting
+  // them poison a batch. Fixed by relink (Step 2 nulls their ids and flips the product off Shopify).
+  staleItems: PushCandidate[];
   suspiciousDrops: PushCandidate[];
   trackingDisabledCount: number;
 }
@@ -201,12 +206,18 @@ export async function dryRunPush(styleCode?: string): Promise<DryRunPushResult> 
 
   let alreadyCorrect = 0;
   const toPush: PushCandidate[] = [];
+  const staleItems: PushCandidate[] = [];
   const suspiciousDrops: PushCandidate[] = [];
   let trackingDisabledCount = 0;
 
   for (const v of withGid) {
     const gid = gidByVariantId.get(v.id)!;
     const state = currentState.get(gid);
+    if (!state) {
+      // nodes(ids:) returned null for this id (the whole chunk query succeeded, or we'd have thrown): deleted on Shopify.
+      staleItems.push({ variantId: v.id, sku: v.sku, inventoryItemGid: gid, currentOnHand: null, targetQty: v.qty, trackingDisabled: false, suspiciousDrop: false });
+      continue;
+    }
     const currentOnHand = state?.currentOnHand ?? null;
     const trackingDisabled = state ? !state.tracked : false;
     if (trackingDisabled) trackingDisabledCount += 1;
@@ -236,6 +247,7 @@ export async function dryRunPush(styleCode?: string): Promise<DryRunPushResult> 
     nullInventoryItemId,
     alreadyCorrect,
     toPush,
+    staleItems,
     suspiciousDrops,
     trackingDisabledCount,
   };
@@ -243,7 +255,7 @@ export async function dryRunPush(styleCode?: string): Promise<DryRunPushResult> 
   console.log(
     `[shopify-inventory-push] DRY RUN location=${location.name ?? "NOT FOUND"} matchesExpected=${location.matchesExpectedAddress} ` +
       `total=${result.totalOnShopifyVariants} toPush=${toPush.length} alreadyCorrect=${alreadyCorrect} ` +
-      `suspiciousDrops=${suspiciousDrops.length} trackingDisabled=${trackingDisabledCount} nullInventoryItemId=${nullInventoryItemId.length}`,
+      `staleItems=${staleItems.length} suspiciousDrops=${suspiciousDrops.length} trackingDisabled=${trackingDisabledCount} nullInventoryItemId=${nullInventoryItemId.length}`,
   );
 
   return result;
@@ -321,23 +333,14 @@ function idempotencyKeyFor(scope: string, quantities: QuantityWrite[]): string {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
 }
 
-// Indexes into `quantities` that Shopify reported as CAS-stale, parsed from
-// the userError field path (["input","quantities","<i>","changeFromQuantity"]).
-function staleIndexesOf(errors: { field: string[] | null; code: string | null }[], count: number): number[] | null {
-  const indexes = new Set<number>();
-  for (const e of errors) {
-    if (e.code !== "CHANGE_FROM_QUANTITY_STALE") return null; // mixed errors — not a pure CAS conflict
-    const idx = Number(e.field?.find((part, i) => i > 0 && e.field![i - 1] === "quantities"));
-    if (!Number.isInteger(idx) || idx < 0 || idx >= count) return null; // can't attribute — treat batch as failed
-    indexes.add(idx);
-  }
-  return [...indexes];
-}
-
-// Returns the indexes that were skipped as CAS-stale (nothing written for
-// them). When ANY item is stale the whole mutation is rejected with
-// userErrors — it is all-or-nothing — so the caller re-submits the rest.
-export async function setQuantitiesWithBackoff(quantities: QuantityWrite[], keyScope: string): Promise<{ staleIndexes: number[] }> {
+// Returns what could not be written and was therefore left out: `staleIndexes` (CAS conflicts — Shopify's on_hand
+// moved; next cycle retries) and `unusable` (the inventory item is gone / not stocked at the location). When ANY
+// item is rejected the whole mutation is rejected with userErrors — it is all-or-nothing — so the caller drops
+// those indexes and re-submits the rest. Only a non-peelable error throws.
+export async function setQuantitiesWithBackoff(
+  quantities: QuantityWrite[],
+  keyScope: string,
+): Promise<{ staleIndexes: number[]; unusable: UnusableItem[] }> {
   const maxAttempts = 5;
   const idempotencyKey = idempotencyKeyFor(keyScope, quantities);
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -363,11 +366,11 @@ export async function setQuantitiesWithBackoff(quantities: QuantityWrite[], keyS
         await sleep(1000 * 2 ** attempt);
         continue;
       }
-      const staleIndexes = staleIndexesOf(payload.userErrors, quantities.length);
-      if (staleIndexes) return { staleIndexes };
+      const classified = classifyUserErrors(payload.userErrors, quantities.length);
+      if (classified) return classified;
       throw new Error(`inventorySetQuantities userErrors: ${message}`);
     }
-    return { staleIndexes: [] };
+    return { staleIndexes: [], unusable: [] };
   }
   throw new Error(`inventorySetQuantities exhausted retries (still throttled)`);
 }
@@ -379,7 +382,9 @@ export interface InventoryPushLogEntry {
   // "conflict" = compare-and-swap mismatch: Shopify's on_hand changed between
   // our read and our write, so we deliberately did NOT overwrite it. Not a
   // failure — the next cycle re-reads and retries.
-  status: "ok" | "failed" | "conflict";
+  // "skipped_stale" = the inventory item no longer exists / isn't stocked at the location: nothing written, the rest
+  // of the batch went through. Not a push failure — relink clears it (and the alert says which products).
+  status: "ok" | "failed" | "conflict" | "skipped_stale";
   message?: string;
   at: string;
 }
@@ -401,6 +406,9 @@ export interface ExecutePushReport {
   // mismatch). Counted apart from `failed` — a conflict is Shopify being
   // right, not the push being broken.
   casConflicts: number;
+  // Items left out because their inventory item is gone (see DryRunPushResult.staleItems) or Shopify rejected
+  // them as INVALID_INVENTORY_ITEM / ITEM_NOT_STOCKED_AT_LOCATION mid-push. Never counted in `failed`.
+  skippedStale: number;
   entries: InventoryPushLogEntry[];
 }
 
@@ -449,8 +457,25 @@ export async function executePush(options: ExecutePushOptions = {}): Promise<Exe
     ok: 0,
     failed: 0,
     casConflicts: 0,
+    skippedStale: 0,
     entries: [],
   };
+
+  // Deleted-on-Shopify items found by the dry run: log them, never send them.
+  if (dryRun.staleItems.length > 0) {
+    const at = new Date().toISOString();
+    const entries: InventoryPushLogEntry[] = dryRun.staleItems.map((v) => ({
+      variantId: v.variantId,
+      inventoryItemGid: v.inventoryItemGid,
+      targetQty: v.targetQty,
+      status: "skipped_stale",
+      message: `inventory item no longer exists on Shopify (sku ${v.sku}) — not pushed; relink clears the stale id`,
+      at,
+    }));
+    await appendLog(entries);
+    report.entries.push(...entries);
+    report.skippedStale += entries.length;
+  }
 
   const toProcess = chunkSize !== undefined ? pending.slice(0, chunkSize) : pending;
   report.remaining = pending.length - toProcess.length;
@@ -475,13 +500,14 @@ export async function executePush(options: ExecutePushOptions = {}): Promise<Exe
     const batch = chunks[chunkIndex];
     const at = new Date().toISOString();
     const conflicts: PushCandidate[] = [];
+    const unusableItems: { item: PushCandidate; code: string; message: string }[] = [];
     let remaining = batch;
     try {
       // One stale item rejects the whole mutation, so peel off the
       // conflicts and re-submit the rest. Bounded: a run of fresh conflicts
       // every round means something is actively churning inventory.
       for (let round = 0; remaining.length > 0 && round < 5; round += 1) {
-        const { staleIndexes } = await setQuantitiesWithBackoff(
+        const { staleIndexes, unusable } = await setQuantitiesWithBackoff(
           remaining.map((v) => ({
             inventoryItemId: v.inventoryItemGid,
             locationId: INVENTORY_LOCATION_ID,
@@ -490,18 +516,21 @@ export async function executePush(options: ExecutePushOptions = {}): Promise<Exe
           })),
           `${cycleId}:chunk-${chunkIndex}`,
         );
-        if (staleIndexes.length === 0) {
+        if (staleIndexes.length === 0 && unusable.length === 0) {
           remaining = [];
           break;
         }
         const stale = new Set(staleIndexes);
+        const gone = new Map(unusable.map((u) => [u.index, u]));
         conflicts.push(...remaining.filter((_, i) => stale.has(i)));
-        remaining = remaining.filter((_, i) => !stale.has(i));
+        for (const [i, u] of gone) unusableItems.push({ item: remaining[i], code: u.code, message: u.message });
+        remaining = remaining.filter((_, i) => !stale.has(i) && !gone.has(i));
         await sleep(CALL_PACING_MS);
       }
       if (remaining.length > 0) throw new Error("CAS conflicts persisted across 5 re-submit rounds — batch abandoned");
 
-      const written = batch.filter((v) => !conflicts.includes(v));
+      const skippedSet = new Set(unusableItems.map((u) => u.item));
+      const written = batch.filter((v) => !conflicts.includes(v) && !skippedSet.has(v));
       const entries: InventoryPushLogEntry[] = written.map((v) => ({
         variantId: v.variantId,
         inventoryItemGid: v.inventoryItemGid,
@@ -515,7 +544,7 @@ export async function executePush(options: ExecutePushOptions = {}): Promise<Exe
       report.ok += written.length;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      const failedItems = batch.filter((v) => !conflicts.includes(v));
+      const failedItems = batch.filter((v) => !conflicts.includes(v) && !unusableItems.some((u) => u.item === v));
       const entries: InventoryPushLogEntry[] = failedItems.map((v) => ({
         variantId: v.variantId,
         inventoryItemGid: v.inventoryItemGid,
@@ -528,6 +557,20 @@ export async function executePush(options: ExecutePushOptions = {}): Promise<Exe
       report.entries.push(...entries);
       report.processedThisRun += failedItems.length;
       report.failed += failedItems.length;
+    }
+
+    if (unusableItems.length > 0) {
+      const entries: InventoryPushLogEntry[] = unusableItems.map((u) => ({
+        variantId: u.item.variantId,
+        inventoryItemGid: u.item.inventoryItemGid,
+        targetQty: u.item.targetQty,
+        status: "skipped_stale",
+        message: `${u.code}: ${u.message} (sku ${u.item.sku}) — not pushed, rest of the batch was`,
+        at,
+      }));
+      await appendLog(entries);
+      report.entries.push(...entries);
+      report.skippedStale += entries.length;
     }
 
     if (conflicts.length > 0) {
@@ -585,7 +628,7 @@ export async function executePush(options: ExecutePushOptions = {}): Promise<Exe
 
   console.log(
     `[shopify-inventory-push] EXECUTE candidates=${report.candidates} ` +
-      `processedThisRun=${report.processedThisRun} remaining=${report.remaining} ok=${report.ok} failed=${report.failed} casConflicts=${report.casConflicts} ` +
+      `processedThisRun=${report.processedThisRun} remaining=${report.remaining} ok=${report.ok} failed=${report.failed} casConflicts=${report.casConflicts} skippedStale=${report.skippedStale} ` +
       `trackingEnabled=${report.trackingEnabled} trackingFailed=${report.trackingFailed.length}`,
   );
 
