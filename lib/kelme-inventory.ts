@@ -12,6 +12,7 @@ import { prisma } from "@/lib/prisma";
 import { fetchSkuSheet } from "@/lib/kelme";
 import { parseSkuSheet } from "@/lib/stock";
 import { buildDeclaredVariants, type DeclaredVariant } from "@/lib/kelme-capture";
+import { isRemoved, loadAllRemovals } from "@/lib/vendor-deletions";
 
 const CALL_PACING_MS = 400;
 
@@ -183,6 +184,7 @@ export async function applyStockToDb(): Promise<ApplyStockResult> {
 
   const dbByKey = new Map(dbVariants.map((v) => [`${v.productId}::${v.colorCode}::${v.shopifySize}`, v]));
   const unmatched: ApplyStockResult["unmatched"] = [];
+  const removals = await loadAllRemovals(); // colors/sizes the vendor deleted on purpose are never "new"
   const distribution = { zero: 0, oneToFive: 0, sixToTwenty: 0, over20: 0 };
   let matched = 0;
   let updated = 0;
@@ -191,6 +193,7 @@ export async function applyStockToDb(): Promise<ApplyStockResult> {
     const key = `${p.productDbId}::${p.colorCode}::${p.shopifySize}`;
     const existing = dbByKey.get(key);
     if (!existing) {
+      if (isRemoved(removals.get(p.styleCode) ?? [], p.colorCode, p.shopifySize)) continue;
       unmatched.push({ productDbId: p.productDbId, styleCode: p.styleCode, colorCode: p.colorCode, shopifySize: p.shopifySize, qty: p.qty });
       continue;
     }

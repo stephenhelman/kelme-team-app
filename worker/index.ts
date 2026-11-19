@@ -16,6 +16,7 @@ import {
   PUSH_FAILURE_ALERT_THRESHOLD,
   VERIFY_MISMATCH_ALERT_THRESHOLD,
   flipAlertBody,
+  newVariantAlertBody,
   shouldRecordSuccessfulSync,
   shouldRelink,
   skippedStaleAlertBody,
@@ -75,6 +76,18 @@ async function runSync(): Promise<void> {
   }
 
   await reportSyncAlert({ kind: "sanity_halt", isBad: false });
+
+  // New Kelme color/size on a live product (the DB never auto-adds variants): tell the admin exactly what to run.
+  if (applyResult.unmatched.length > 0) {
+    await reportSyncAlert({
+      kind: "new_kelme_variants",
+      isBad: true,
+      subject: `Kelme sync: ${applyResult.unmatched.length} new Kelme variant(s) on live products need adding`,
+      body: newVariantAlertBody(applyResult.unmatched),
+    });
+  } else {
+    await reportSyncAlert({ kind: "new_kelme_variants", isBad: false });
+  }
 
   log(
     `sync: DB caught up (matched=${applyResult.matched} updated=${applyResult.updated} ` +

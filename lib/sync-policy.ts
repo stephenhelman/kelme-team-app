@@ -45,3 +45,36 @@ export function verifyMismatchAlertBody(total: number, sample: { sku: string; ex
   const lines = sample.slice(0, 15).map((m) => `  - ${m.sku}: Kelme/DB ${m.expectedQty}, Shopify ${m.actualOnHand ?? "no level"}`);
   return `${total} variants differ between the DB and Shopify after this cycle's push (threshold ${VERIFY_MISMATCH_ALERT_THRESHOLD}). First ${lines.length}:\n\n${lines.join("\n")}`;
 }
+
+export interface NewVariant {
+  styleCode: string;
+  colorCode: string;
+  shopifySize: string;
+  qty: number;
+}
+
+/** Kelme variants (new color/size on a live product) the DB doesn't have, grouped per style with the exact add command. */
+export function newVariantGroups(unmatched: NewVariant[]): { styleCode: string; sizes: string[]; variants: NewVariant[]; command: string }[] {
+  const by = new Map<string, NewVariant[]>();
+  for (const u of unmatched) {
+    if (!by.has(u.styleCode)) by.set(u.styleCode, []);
+    by.get(u.styleCode)!.push(u);
+  }
+  return [...by.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([styleCode, variants]) => {
+      const sizes = [...new Set(variants.map((v) => v.shopifySize))];
+      return { styleCode, sizes, variants, command: `npm run sizes -- add-sizes --styleCode ${styleCode} --sizes ${sizes.join(",")}` };
+    });
+}
+
+export function newVariantAlertBody(unmatched: NewVariant[]): string {
+  const groups = newVariantGroups(unmatched);
+  const blocks = groups.map((g) => `${g.styleCode}\n${g.variants.map((v) => `  + color ${v.colorCode}, size ${v.shopifySize}, Kelme qty ${v.qty}`).join("\n")}\n  dry-run: ${g.command}\n  apply:   ${g.command} --execute   (stop the Railway worker first)`);
+  return (
+    `Kelme now offers ${unmatched.length} color/size combination(s) on live products that are not in the DB or on Shopify. ` +
+    "Nothing was added automatically.\n\n" +
+    blocks.join("\n\n") +
+    "\n\nIf the vendor deleted a color/size on purpose, it is recorded with `npm run vendor-deletions -- --execute` and never shows up here."
+  );
+}

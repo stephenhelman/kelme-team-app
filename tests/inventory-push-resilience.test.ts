@@ -99,3 +99,23 @@ test("alert bodies list the offenders", () => {
   assert.match(flip, /3871001: 68 variants, 3995 units/);
   assert.equal(VERIFY_MISMATCH_ALERT_THRESHOLD, 20);
 });
+
+import { newVariantAlertBody, newVariantGroups } from "../lib/sync-policy";
+
+test("new-variant alert: grouped per style, exact one-command add, never auto-adds", () => {
+  const u = [
+    { styleCode: "3801265", colorCode: "000", shopifySize: "XS", qty: 0 },
+    { styleCode: "3801265", colorCode: "100", shopifySize: "XS", qty: 0 },
+    { styleCode: "7351ZB3255", colorCode: "104", shopifySize: "10", qty: 0 },
+    { styleCode: "7351ZB3255", colorCode: "104", shopifySize: "12", qty: 0 },
+    { styleCode: "7351ZB3255", colorCode: "107", shopifySize: "4", qty: 80 },
+  ];
+  const g = newVariantGroups(u);
+  assert.deepEqual(g.map((x) => x.command), [
+    "npm run sizes -- add-sizes --styleCode 3801265 --sizes XS",
+    "npm run sizes -- add-sizes --styleCode 7351ZB3255 --sizes 10,12,4",
+  ]);
+  const body = newVariantAlertBody(u);
+  assert.match(body, /Nothing was added automatically/);
+  assert.match(body, /add-sizes --styleCode 3801265 --sizes XS --execute/);
+});
